@@ -1560,6 +1560,38 @@ describe('requireDirective ownership gate', () => {
 		expect(pragmaTs?.kind).toBe('slots');
 	});
 
+	it.each(['client', 'server'] as const)(
+		'owns the Strong JSX type pragma in the %s pipeline',
+		(environment) => {
+			const compiler = createOctaneCompiler({ root: resolve('/project'), requireDirective: true });
+			const pragma = '/** @jsxImportSource octane/strong */\n';
+			const trusted =
+				pragma +
+				"'use strong';\nimport { trustHTML } from 'octane';\n" +
+				'export function App() { return <div dangerouslySetInnerHTML={trustHTML("<b>safe</b>")} />; }';
+			expect(compiler.transform(trusted, '/project/src/Strong.tsx', { environment })?.kind).toBe(
+				'compile',
+			);
+			expect(() =>
+				compiler.transform(
+					pragma +
+						"'use strong';\nexport function Raw() { return <div dangerouslySetInnerHTML={{__html: 'raw'}} />; }",
+					'/project/src/Raw.tsx',
+					{ environment },
+				),
+			).toThrow(/OCTANE_STRONG_UNTRUSTED_HTML/);
+			expect(
+				compiler.transform(
+					'// @jsxImportSource octane/strong\n' + HOOK,
+					'/project/src/useCount.ts',
+					{
+						environment,
+					},
+				)?.kind,
+			).toBe('slots');
+		},
+	);
+
 	it('does not let a foreign @jsxImportSource pragma claim a file', () => {
 		const compiler = createOctaneCompiler({
 			root: resolve('/project'),

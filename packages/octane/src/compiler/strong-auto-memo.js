@@ -1,0 +1,105 @@
+import { builders as b } from '@tsrx/core';
+import {
+	analyzeStrongMemoCandidates,
+	STRONG_AUTOMATIC_MEMO_UNSUPPORTED,
+	STRONG_MEMO_EVAL_MESSAGE,
+} from './hook-deps.js';
+import { hasInlineMemoDirectEval } from './inline-hook-memo.js';
+
+const SKIP_KEYS = new Set(['loc', 'start', 'end', 'range', 'metadata', 'parent']);
+
+// Stamp only new builder nodes. Authored subtrees retain their own locations
+// and are never mutated, including when the parser supplied a frozen AST.
+function origin(node, source) {
+	if (!node || typeof node !== 'object') return node;
+	if (Array.isArray(node)) return node.map((child) => origin(child, source));
+	if (node.loc !== undefined) return node;
+	const copy = { ...node };
+	if (typeof node.type === 'string')
+		Object.assign(copy, { start: source.start, end: source.end, loc: source.loc });
+	for (const key in node) if (!SKIP_KEYS.has(key)) copy[key] = origin(node[key], source);
+	return copy;
+}
+
+export function unsupportedStrongAutomaticMemo(node, filename, message) {
+	const line = node?.loc?.start?.line ?? 1;
+	const column = node?.loc?.start?.column ?? 0;
+	const error = new SyntaxError(
+		`${filename ?? '<anonymous>'}:${line}:${column + 1}: [${STRONG_AUTOMATIC_MEMO_UNSUPPORTED}] ${message}`,
+	);
+	Object.assign(error, {
+		code: STRONG_AUTOMATIC_MEMO_UNSUPPORTED,
+		filename,
+		loc: { line, column },
+		pos: node?.start ?? 0,
+		end: node?.end ?? 0,
+	});
+	return error;
+}
+
+/**
+ * Cache eligible Strong declarations before dependency inference. These hooks
+ * retain effect/subscription identity in development as well as production;
+ * later production passes may inline the same runtime cache semantics.
+ * The caller invokes this only after validating authored Strong source.
+ */
+export function applyStrongAutomaticMemo(ast, options = {}) {
+	const { candidates, names, hookCalls } = analyzeStrongMemoCandidates(ast, options);
+	if (candidates.size === 0 && hookCalls.size === 0) return ast;
+	if (candidates.size > 0 && hasInlineMemoDirectEval(ast))
+		throw unsupportedStrongAutomaticMemo(
+			candidates.keys().next().value.init,
+			options.filename,
+			STRONG_MEMO_EVAL_MESSAGE,
+		);
+	const aliases = new Map();
+	for (const hook of new Set([...candidates.values(), ...hookCalls.values()])) {
+		let alias = `_$strong${hook}`;
+		while (names.has(alias)) alias += '_';
+		names.add(alias);
+		aliases.set(hook, alias);
+	}
+	function rebuild(node) {
+		if (!node || typeof node !== 'object') return node;
+		if (Array.isArray(node)) {
+			const children = node.map(rebuild);
+			return children.some((child, index) => child !== node[index]) ? children : node;
+		}
+		const importedHook = hookCalls.get(node);
+		if (importedHook) {
+			// Built-in exports are immutable and defined: normalize proven aliases
+			// and optional calls so existing dependency/slot passes see their ABI.
+			return {
+				...node,
+				callee: b.id(aliases.get(importedHook), node.callee),
+				optional: false,
+				arguments: rebuild(node.arguments),
+			};
+		}
+		const hook = candidates.get(node);
+		if (hook) {
+			const initial = rebuild(node.init);
+			const callback = hook === 'useCallback' ? initial : origin(b.arrow([], initial), node.init);
+			return { ...node, init: origin(b.call(b.id(aliases.get(hook)), callback), node.init) };
+		}
+		let output = node;
+		for (const key in node) {
+			if (SKIP_KEYS.has(key)) continue;
+			const value = rebuild(node[key]);
+			if (value !== node[key]) {
+				if (output === node) output = { ...node };
+				output[key] = value;
+			}
+		}
+		return output;
+	}
+	const result = rebuild(ast);
+	const imports = origin(
+		b.imports(
+			[...aliases].map(([hook, alias]) => [hook, alias]),
+			'octane',
+		),
+		ast.body.find((node) => node.loc) ?? ast,
+	);
+	return { ...result, body: [...result.body, imports] };
+}

@@ -479,6 +479,10 @@ The tuple also supports the same optional latest-value getter as `useState`.
 
 ## Optional Strong mode
 
+Strong modules also require inferred dependencies, compiler-owned memoization,
+keyed template lists, and branded HTML values. See the
+[Strong compiler checks and migration table](./strong-compiler-checks.md).
+
 Strong mode opts into the immutable render-snapshot contract above and adds
 compile-time checks for detectable violations. Opt into one module with a
 directive before its imports:
@@ -503,11 +507,11 @@ when rendering; call the getter in events, effects, or deferred work. Reading a
 reassigned module-scope `let` or `var` during render is also an error
 (`OCTANE_STRONG_RENDER_MODULE_STATE_READ`): move changing values into state or
 context, or pass an immutable snapshot as a prop. The checks follow provable
-synchronous calls through `useCallback`, `useEffectEvent`,
-and functions returned by analyzable `useMemo` factories. Calling a statically
+synchronous calls through local callbacks and `useEffectEvent`. Calling a statically
 known Effect Event during render or including it in an explicit hook dependency
-list is also a compile error. The hooks themselves remain supported, and other
-explicit dependency lists retain their existing meaning.
+list is also a compile error. Strong modules use normal const declarations for
+automatic memoization. Manual memo hooks and non-equivalent explicit dependencies
+are errors; equivalent arrays keep their behavior and produce a hint.
 
 The compiler also rejects render-time writes through a provable state snapshot
 (`OCTANE_STRONG_RENDER_SNAPSHOT_MUTATION`) and direct calls to known

@@ -1,0 +1,344 @@
+import { describe, expect, it } from 'vitest';
+import { flushSync } from 'octane';
+import { createScope } from 'octane/signals';
+import { loadCompiledFixtureSource, loadPlainHookFixtureSource } from './_server-fixture.js';
+import { act, flushEffects, mount } from './_helpers';
+
+describe('Strong declarations used as reactive hook inputs', () => {
+	it.each([
+		["import { useEffect } from 'octane';", 'useEffect?.'],
+		["import * as Octane from 'octane';", 'Octane?.useEffect'],
+		["import * as Octane from 'octane'; const { useEffect: effect } = Octane;", 'effect'],
+	])('infers and slots proven optional/aliased effect imports %s', (imports, callee) => {
+		for (const plain of [false, true]) {
+			const seen: string[] = [];
+			const setup = `"use strong"; ${imports} import { observe } from './probe'; export function useRead(props) { ${callee}(() => observe(props.label)); }`;
+			const runtimeModules = { './probe': { observe: (label: string) => seen.push(label) } };
+			const hook = plain
+				? loadPlainHookFixtureSource(setup, {
+						id: '/src/StrongAlias.ts',
+						inlineHookMemo: false,
+						runtimeModules,
+					})
+				: null;
+			const { App } = loadCompiledFixtureSource(
+				plain
+					? `import { useRead } from './hook'; export function App(props) @{ useRead(props); <span>{props.noise as string}</span> }`
+					: `${setup} export function App(props) @{ useRead(props); <span>{props.noise as string}</span> }`,
+				{
+					id: '/src/StrongAlias.tsrx',
+					mode: 'client',
+					compileOptions: { dev: true, hmr: false },
+					runtimeModules: { ...runtimeModules, ...(hook ? { './hook': hook } : {}) },
+				},
+			);
+			const mounted = mount(App, { label: 'first', noise: 'one' });
+			try {
+				flushEffects();
+				expect(seen).toEqual(['first']);
+				mounted.update(App, { label: 'first', noise: 'two' });
+				flushEffects();
+				expect(seen).toEqual(['first']);
+				mounted.update(App, { label: 'second', noise: 'two' });
+				flushEffects();
+				expect(seen).toEqual(['first', 'second']);
+			} finally {
+				mounted.unmount();
+			}
+		}
+	});
+
+	it.each([false, true])(
+		'retains live native reads after automatic cache hits in dev=%s',
+		(dev) => {
+			const lifecycle: string[] = [];
+			const { App } = loadCompiledFixtureSource(
+				`"use strong";
+import { useEffect } from 'octane';
+import 'octane/signals';
+import { observe } from './probe';
+export function App(props) @{
+  const value = { label: props.read$() };
+  useEffect(() => observe(value));
+  <output>{value.label as string}</output>
+}`,
+				{
+					id: '/src/StrongNativeCache.tsrx',
+					mode: 'client',
+					compileOptions: { dev, hmr: false },
+					runtimeModules: {
+						'./probe': { observe: (value: { label: string }) => lifecycle.push(value.label) },
+					},
+				},
+			);
+			const scope = createScope({ scopeKey: 'strong-native-cache-' + dev });
+			const label$ = scope.signal$('label', 'first');
+			const props = { read$: () => label$.get() };
+			const mounted = mount(App, props);
+			try {
+				flushEffects();
+				expect(lifecycle).toEqual(['first']);
+				mounted.update(App, props);
+				flushEffects();
+				expect(lifecycle).toEqual(['first']);
+				flushSync(() => label$.set('second'));
+				flushEffects();
+				expect(mounted.find('output').textContent).toBe('second');
+				expect(lifecycle).toEqual(['first', 'second']);
+			} finally {
+				mounted.unmount();
+				scope.dispose();
+			}
+		},
+	);
+
+	it.each([
+		['object literal', 'const value = { label: props.label };', (value: any) => value.label],
+		['array literal', 'const value = [props.label];', (value: any) => value[0]],
+		['arrow callback', 'const value = () => props.label;', (value: any) => value()],
+		[
+			'function expression',
+			'const value = function () { return props.label; };',
+			(value: any) => value(),
+		],
+		['constructor', 'const value = new Box(props.label);', (value: any) => value.label],
+		['member projection', 'const value = factory.make(props.label);', (value: any) => value.label],
+		[
+			'hook-spelled pure method',
+			'const value = factory.useValue(props.label);',
+			(value: any) => value.label,
+		],
+		[
+			'optional projection',
+			'const value = factory.make?.(props.label);',
+			(value: any) => value.label,
+		],
+		['tagged template', 'const value = tag`label:${props.label}`;', (value: any) => value.label],
+		[
+			'invoked closure',
+			'const value = (() => ({ label: props.label }))();',
+			(value: any) => value.label,
+		],
+		[
+			'conditional objects',
+			'const value = props.label ? { label: props.label } : { label: "empty" };',
+			(value: any) => value.label,
+		],
+	])('keeps %s stable for effects until its inputs change', (_name, declaration, read) => {
+		for (const compileOptions of [
+			{ dev: false, hmr: false },
+			{ dev: true, hmr: false },
+		]) {
+			const lifecycle: string[] = [];
+			class Box {
+				constructor(public label: string) {}
+			}
+			const source = `"use strong";
+import { useEffect } from 'octane';
+import { observe, read, Box, factory, tag } from './probe';
+export function App(props) @{
+  ${declaration}
+  useEffect(() => { const label = read(value); observe('start:' + label); return () => observe('stop:' + label); });
+  <span>{props.noise as string}</span>
+}`;
+			const { App } = loadCompiledFixtureSource(source, {
+				id: '/src/StrongCache.tsrx',
+				mode: 'client',
+				compileOptions,
+				runtimeModules: {
+					'./probe': {
+						observe: (value: string) => lifecycle.push(value),
+						read,
+						Box,
+						factory: {
+							make: (label: string) => ({ label }),
+							useValue: (label: string) => ({ label }),
+						},
+						tag: (_parts: unknown, label: string) => ({ label }),
+					},
+				},
+			});
+			const mounted = mount(App, { label: 'first', noise: 'one' });
+			try {
+				flushEffects();
+				expect(lifecycle).toEqual(['start:first']);
+				mounted.update(App, { label: 'first', noise: 'two' });
+				flushEffects();
+				expect(mounted.container.textContent).toBe('two');
+				expect(lifecycle, JSON.stringify(compileOptions)).toEqual(['start:first']);
+				mounted.update(App, { label: 'second', noise: 'three' });
+				flushEffects();
+				expect(lifecycle).toEqual(['start:first', 'stop:first', 'start:second']);
+			} finally {
+				mounted.unmount();
+			}
+			expect(lifecycle).toEqual(['start:first', 'stop:first', 'start:second', 'stop:second']);
+		}
+	});
+	it.each([false, true])(
+		'preserves custom-hook identity and parallel use with HMR=%s',
+		async (hmr) => {
+			const starts: string[] = [];
+			const lifecycle: string[] = [];
+			const pending: Array<() => void> = [];
+			const hooks = loadPlainHookFixtureSource(
+				`"use strong";
+import { use, useEffect } from 'octane';
+import { request, observe } from './probe';
+export function useData(label: string) {
+  const options = { label };
+  const a = use(request('a', label));
+  const b = use(request('b', label));
+  useEffect(() => { observe('start', options); return () => observe('stop', options); });
+  return { a, b };
+}`,
+				{
+					id: '/src/useStrongData.ts',
+					inlineHookMemo: false,
+					hmr,
+					runtimeModules: {
+						'./probe': {
+							request: (name: string, label: string) => {
+								starts.push(name + ':' + label);
+								return new Promise<string>((resolve) =>
+									pending.push(() => resolve(name + ':' + label)),
+								);
+							},
+							observe: (phase: string, value: { label: string }) =>
+								lifecycle.push(phase + ':' + value.label),
+						},
+					},
+				},
+			);
+			const { App } = loadCompiledFixtureSource(
+				`import { Suspense } from 'octane';
+import { useData } from './hook';
+function Data(props) @{ const result = useData(props.label); <span>{result.a + result.b + props.noise as string}</span> }
+export function App(props) @{ <Suspense fallback={<i>loading</i>}><Data label={props.label} noise={props.noise} /></Suspense> }
+`,
+				{ id: '/src/StrongData.tsrx', mode: 'client', runtimeModules: { './hook': hooks } },
+			);
+			const mounted = mount(App, { label: 'first', noise: 'one' });
+			try {
+				expect(mounted.container.textContent).toBe('loading');
+				expect(starts).toEqual(['a:first', 'b:first']);
+				await act(async () => {
+					for (const resolve of pending.splice(0)) resolve();
+				});
+				flushEffects();
+				expect(mounted.container.textContent).toBe('a:firstb:firstone');
+				expect(lifecycle).toEqual(['start:first']);
+				mounted.update(App, { label: 'first', noise: 'two' });
+				flushEffects();
+				expect(mounted.container.textContent).toBe('a:firstb:firsttwo');
+				expect(lifecycle).toEqual(['start:first']);
+				expect(starts).toEqual(['a:first', 'b:first']);
+			} finally {
+				mounted.unmount();
+			}
+			expect(lifecycle).toEqual(['start:first', 'stop:first']);
+		},
+	);
+
+	it('keeps locally mutated aliased objects fresh', () => {
+		const { App } = loadCompiledFixtureSource(
+			`"use strong";
+export function App(props) @{ const value = { count: 0 }; const alias = value; alias.count++; <span>{props.label + ':' + value.count as string}</span> }
+`,
+			{ id: '/src/LocalMutation.tsrx', mode: 'client' },
+		);
+		const mounted = mount(App, { label: 'first' });
+		try {
+			expect(mounted.container.textContent).toBe('first:1');
+			mounted.update(App, { label: 'second' });
+			expect(mounted.container.textContent).toBe('second:1');
+		} finally {
+			mounted.unmount();
+		}
+	});
+
+	it.each([
+		[
+			'member alias',
+			'const outer = { nested: { count: 0 } }; const nested = outer.nested; nested.count++;',
+			'outer.nested.count',
+		],
+		[
+			'destructured alias',
+			'const outer = { nested: { count: 0 } }; const { nested } = outer; nested.count++;',
+			'outer.nested.count',
+		],
+		[
+			'shallow object copy',
+			'const outer = { nested: { count: 0 } }; const copy = { ...outer }; copy.nested.count++;',
+			'outer.nested.count',
+		],
+		[
+			'shallow array copy',
+			'const outer = [{ count: 0 }]; const copy = [...outer]; copy[0].count++;',
+			'outer[0].count',
+		],
+		[
+			'destructuring assignment',
+			'const outer = { count: 0 }; [outer.count] = [outer.count + 1];',
+			'outer.count',
+		],
+		[
+			'Object.assign',
+			'const outer = { count: 0 }; Object.assign(outer, { count: outer.count + 1 });',
+			'outer.count',
+		],
+	])('preserves fresh nested objects through %s', (_label, setup, read) => {
+		const { App } = loadCompiledFixtureSource(
+			`"use strong"; export function App(props) @{ ${setup} <span>{props.label + ':' + ${read} as string}</span> }`,
+			{ id: '/src/NestedMutation.tsrx', mode: 'client' },
+		);
+		const mounted = mount(App, { label: 'first' });
+		try {
+			expect(mounted.container.textContent).toBe('first:1');
+			mounted.update(App, { label: 'second' });
+			expect(mounted.container.textContent).toBe('second:1');
+		} finally {
+			mounted.unmount();
+		}
+	});
+
+	it('keeps setup hooks live through recursive local helper references', () => {
+		const { App } = loadCompiledFixtureSource(
+			`"use strong"; import { useState } from 'octane';
+function first(depth) { if (depth) return second(false); return useState(0); }
+function second(depth) { return first(depth); }
+export function App() @{ const initial = first(false); const value = second(false); <button onClick={() => value[1](value[0] + 1)}>{value[0] as string}</button> }
+`,
+			{ id: '/src/RecursiveSetup.tsrx', mode: 'client' },
+		);
+		const mounted = mount(App);
+		try {
+			expect(mounted.container.textContent).toBe('0');
+			mounted.click('button');
+			expect(mounted.container.textContent).toBe('1');
+		} finally {
+			mounted.unmount();
+		}
+	});
+
+	it('preserves callback captures initialized after the declaration', () => {
+		const seen: string[] = [];
+		const { App } = loadCompiledFixtureSource(
+			`"use strong";
+export function App(props) @{ const read = () => label; const label = props.label; <button onClick={() => props.observe(read())}>read</button> }
+`,
+			{ id: '/src/LateCapture.tsrx', mode: 'client' },
+		);
+		const observe = (value: string) => seen.push(value);
+		const mounted = mount(App, { label: 'first', observe });
+		try {
+			mounted.click('button');
+			mounted.update(App, { label: 'second', observe });
+			mounted.click('button');
+			expect(seen).toEqual(['first', 'second']);
+		} finally {
+			mounted.unmount();
+		}
+	});
+});

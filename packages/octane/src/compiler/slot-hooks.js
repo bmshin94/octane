@@ -20,6 +20,8 @@ import { NATIVE_SIGNAL_HOOK_NAMES } from './hook-names.js';
 import { METHOD_DEP_IMPORT, annotateHookCalls } from './hook-deps.js';
 import { inlinePlainHookMemos } from './plain-hook-memo.js';
 import { assertStrongMode } from './strong-mode.js';
+import { applyStrongAutomaticMemo, unsupportedStrongAutomaticMemo } from './strong-auto-memo.js';
+import { inheritHookMemoOrigin } from './inline-hook-memo.js';
 import { assertNativeReadDiagnostics, nativeReadOptions } from './native-read-diagnostics.js';
 import { nativeReadActivationIndex } from './native-read-codegen.js';
 import { findManualHookProviders, manualHookWrapperParameters } from './manual-hooks.js';
@@ -873,6 +875,10 @@ function emitParallelUseRun(run, owner, st) {
 		// Leave plain source untouched when every read is a proven context.
 		return;
 	}
+	if (st.emitAstRun !== undefined) {
+		st.emitAstRun(run, owner);
+		return;
+	}
 	const memoName = st.nativeReads
 		? 'nativePuMemo'
 		: st.environment === 'server'
@@ -997,6 +1003,85 @@ function collectParallelUseEdits(ast, st) {
 	}
 
 	scan(ast.body, hookOwner(null, 'module'));
+}
+
+// Reuse the surgical pass's stratum and dependency analysis when Strong needs
+// a whole-Program declaration transform. Only the emission changes to AST.
+function prepareStrongParallelUse(ast, source, options) {
+	const replacements = new Map();
+	const prefixes = new Map();
+	const inferred = new Map();
+	collectParallelUseEdits(ast, {
+		provenContextBindings: collectProvenContextBindings(ast),
+		source,
+		emitAstRun(run) {
+			const declarations = [];
+			const temps = [];
+			for (const entry of run.uses) {
+				const temp = options.allocateName('__pu$');
+				temps.push(temp);
+				let creation = entry.arg;
+				if (!isTrivialParallelUseArg(entry.arg)) {
+					const imported = options.nativeReads
+						? 'nativePuMemo'
+						: options.environment === 'server'
+							? 'puMemo'
+							: 'useMemo';
+					creation = b.call(
+						options.requireHelper(imported),
+						b.arrow([], creation),
+						b.array(entry.dependencies.map((dependency) => dependency.node)),
+						options.allocateSlot(entry.call),
+					);
+				}
+				declarations.push(inheritHookMemoOrigin(b.const(temp, creation), entry.arg));
+				replacements.set(entry.arg, b.id(temp, entry.arg));
+			}
+			const batch = options.environment === 'server' ? 'puBatch' : 'useBatch';
+			declarations.push(
+				inheritHookMemoOrigin(
+					b.stmt(b.call(options.requireHelper(batch), b.array(temps.map((temp) => b.id(temp))))),
+					run.uses[0].call,
+				),
+			);
+			prefixes.set(run.uses[0].statement, declarations);
+		},
+	});
+	function rebuild(node) {
+		if (!node || typeof node !== 'object') return node;
+		if (replacements.has(node)) return replacements.get(node);
+		if (Array.isArray(node)) {
+			let changed = false;
+			const output = [];
+			for (const child of node) {
+				if (prefixes.has(child)) {
+					output.push(...prefixes.get(child));
+					changed = true;
+				}
+				const result = rebuild(child);
+				output.push(result);
+				changed ||= result !== child;
+			}
+			return changed ? output : node;
+		}
+		let output = node;
+		for (const key in node) {
+			if (
+				['loc', 'start', 'end', 'range', 'metadata', 'parent'].includes(key) ||
+				key.startsWith('_octane')
+			)
+				continue;
+			const value = rebuild(node[key]);
+			if (value !== node[key]) {
+				if (output === node) output = { ...node };
+				output[key] = value;
+			}
+		}
+		if (options.inferred.has(node)) inferred.set(output, options.inferred.get(node));
+		return output;
+	}
+	const result = rebuild(ast);
+	return { ast: result, inferred, getterCalls: collectStateGetterCalls(result) };
 }
 
 // Locate the call delimiter after the callee/type arguments without consuming
@@ -1297,7 +1382,7 @@ function parseHookSource(source, id) {
  *   `inlineHookMemo: true` enables the production-client whole-AST memo path;
  *   the default remains surgical. `manualSlots: true` permits memo and observed
  *   getter rewrites without injecting or changing the authored slot policy.
- * @returns {{ code: string, map: any } | null}
+ * @returns {{ code: string, map: any, diagnostics?: any[] } | null}
  */
 export function slotHooks(source, id, options) {
 	const environment = options?.environment ?? 'client';
@@ -1314,8 +1399,23 @@ export function slotHooks(source, id, options) {
 		return null; // let the normal pipeline surface the parse error
 	}
 	options = nativeReadOptions(ast, options);
-	assertStrongMode(ast, source, id, options);
+	const strongAnalysis = assertStrongMode(ast, source, id, options);
+	const strongHints = strongAnalysis?.diagnostics.length
+		? { diagnostics: strongAnalysis.diagnostics }
+		: {};
 	assertNativeReadDiagnostics(ast, source, id, options);
+	let strongMemoChanged = false;
+	if (strongAnalysis?.enabled) {
+		const memoized = applyStrongAutomaticMemo(ast, options);
+		strongMemoChanged = memoized !== ast;
+		if (strongMemoChanged && options?.manualSlots)
+			throw unsupportedStrongAutomaticMemo(
+				ast.body[0],
+				id,
+				'Strong declaration caching cannot add cache slots to a manually slotted module. Keep manual slot management behind a compatibility-module boundary.',
+			);
+		ast = memoized;
+	}
 	const importInfo = octaneHookLocals(
 		ast,
 		options?.nativeReads === true,
@@ -1335,7 +1435,7 @@ export function slotHooks(source, id, options) {
 		!nativeReadActivation &&
 		!manualProviders.size
 	) {
-		return null;
+		return strongAnalysis?.diagnostics.length ? { code: source, map: null, ...strongHints } : null;
 	}
 	// The parsed tree is never mutated: annotateHookCalls returns a COW-rebuilt
 	// module whose hook calls carry their `_octane*` props (start/end offsets are
@@ -1357,17 +1457,24 @@ export function slotHooks(source, id, options) {
 	}
 	const getterCalls = importInfo.importsHook ? collectStateGetterCalls(ast) : new WeakSet();
 	if (
-		canPrint &&
-		options?.inlineHookMemo === true &&
-		environment === 'client' &&
-		!options?.hmr &&
-		!options?.dev &&
-		!options?.profile &&
-		options?.universalRuntime == null &&
-		options?.renderer?.target !== 'universal' &&
-		!(canSpecializeRoot && collectVoidRootCandidates(ast).length > 0)
+		strongMemoChanged ||
+		(canPrint &&
+			options?.inlineHookMemo === true &&
+			environment === 'client' &&
+			!options?.hmr &&
+			!options?.dev &&
+			!options?.profile &&
+			options?.universalRuntime == null &&
+			options?.renderer?.target !== 'universal' &&
+			!(canSpecializeRoot && collectVoidRootCandidates(ast).length > 0))
 	) {
 		const inlined = inlinePlainHookMemos(ast, source, id, {
+			strongAutomaticMemo: strongMemoChanged,
+			hmr: options?.hmr === true,
+			profile: options?.profile === true,
+			profileFilename: options?.profileFilename ?? id,
+			environment,
+			prepareParallelUse: strongMemoChanged ? prepareStrongParallelUse : undefined,
 			hookLocals: importInfo.locals,
 			manualSlots: options?.manualSlots === true,
 			hookNames:
@@ -1380,7 +1487,15 @@ export function slotHooks(source, id, options) {
 			getterCalls,
 			stateGetterHelpers: STATE_GETTER_HELPERS,
 		});
-		if (inlined !== null) return inlined;
+		if (inlined !== null) return { ...inlined, ...strongHints };
+		if (strongMemoChanged)
+			throw unsupportedStrongAutomaticMemo(
+				ast.body.find(
+					(node) => node.type !== 'ImportDeclaration' && node.type !== 'ExpressionStatement',
+				) ?? ast.body[0],
+				id,
+				'Strong declaration caching cannot print this module’s syntax safely. Move this module behind a compatibility boundary or use supported TypeScript syntax.',
+			);
 	}
 	const st = {
 		manualSlots: options?.manualSlots === true,
@@ -1418,7 +1533,8 @@ export function slotHooks(source, id, options) {
 	if (canSpecializeRoot) {
 		collectVoidRootEdits(ast, st, options.isVoidComponentImport);
 	}
-	if (st.edits.length === 0 && !nativeReadActivation) return null;
+	if (st.edits.length === 0 && !nativeReadActivation)
+		return strongAnalysis?.diagnostics.length ? { code: source, map: null, ...strongHints } : null;
 	const activation = nativeReadActivation
 		? requireParallelHelper(st, 'enableNativeReadCollection')
 		: null;
@@ -1488,5 +1604,5 @@ export function slotHooks(source, id, options) {
 			code.slice(edit.end === undefined ? edit.pos : edit.end);
 	}
 	if (activation === null) code = code.endsWith('\n') ? code + block : code + '\n' + block;
-	return { code, map: null };
+	return { code, map: null, ...strongHints };
 }

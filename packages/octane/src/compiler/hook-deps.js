@@ -3,6 +3,11 @@
 // surgical plain-TS hook pass, keeping custom hooks and components aligned.
 
 import { builders as b } from '@tsrx/core';
+import { hasInlineMemoDirectEval } from './inline-hook-memo.js';
+
+export const STRONG_AUTOMATIC_MEMO_UNSUPPORTED = 'OCTANE_STRONG_AUTOMATIC_MEMO_UNSUPPORTED';
+export const STRONG_MEMO_EVAL_MESSAGE =
+	'Strong declaration caching cannot preserve lexical eval semantics. Move the reflective code behind a compatibility-module boundary.';
 
 const DEPENDENCY_HOOKS = new Map([
 	['useEffect', { callback: 0, deps: 1 }],
@@ -1549,6 +1554,198 @@ export function analyzeHookDependencies(ast, options = {}) {
 	return analyzeInternal(ast, options).inferred;
 }
 
+// Strong dependency policy deliberately shares inference's lexical graph and
+// dependency collector. Comparing source strings, or independently collecting
+// free names here, would disagree on stable hooks and Effect Event exclusions.
+function strongHookNameResolver(analysis, onlyImported) {
+	const aliases = new Map();
+	function propertyName(property, computed) {
+		const key = unwrapValue(property);
+		return computed ? (key?.type === 'Literal' ? key.value : null) : key?.name;
+	}
+	for (const { decl, bindings, kind } of analysis.declarators) {
+		if (kind !== 'const' || !decl.init) continue;
+		const byPattern = new Map(bindings.map(({ pattern, binding }) => [pattern, binding]));
+		function collect(pattern, path) {
+			if (pattern?.type === 'Identifier') {
+				const binding = byPattern.get(pattern);
+				if (binding && !binding.reassigned) aliases.set(binding, { node: decl.init, path });
+			} else if (pattern?.type === 'AssignmentPattern') {
+				// Named namespace exports are defined, so their defaults cannot run.
+				collect(pattern.left, path);
+			} else if (pattern?.type === 'ObjectPattern') {
+				for (const property of pattern.properties) {
+					if (property.type === 'RestElement') continue;
+					const name = propertyName(property.key, property.computed);
+					if (typeof name === 'string') collect(property.value, [...path, name]);
+				}
+			}
+		}
+		collect(decl.id, []);
+	}
+	function resolve(node, scope, seen = new Set()) {
+		const value = unwrapValue(node);
+		if (value?.type === 'ChainExpression') return resolve(value.expression, scope, seen);
+		if (value?.type === 'Identifier') {
+			const binding = resolveBinding(scope, value.name);
+			if (binding === null) return onlyImported ? null : value.name;
+			if (binding.reassigned) return null;
+			if (binding.hookRuntimeImport) return binding.hookRuntimeImport;
+			if (binding.hookRuntimeNamespace) return '*';
+			if (!aliases.has(binding) || seen.has(binding)) return null;
+			seen.add(binding);
+			const alias = aliases.get(binding);
+			let name = resolve(alias.node, analysis.nodeScopes.get(alias.node) ?? binding.scope, seen);
+			for (const property of alias.path) name = name === '*' ? property : null;
+			return name;
+		}
+		if (value?.type === 'MemberExpression') {
+			const name = propertyName(value.property, value.computed);
+			return typeof name === 'string' && resolve(value.object, scope, seen) === '*' ? name : null;
+		}
+		return null;
+	}
+	// Optional calls still target defined, immutable Octane exports. Optional
+	// syntax must not bypass Strong authoring policy for those proven imports.
+	return (call, scope) => resolve(call.callee, scope);
+}
+
+function dependencyExpressionKey(expression, analysis) {
+	const node = unwrapValue(expression);
+	if (node?.type === 'Identifier') {
+		const scope = analysis.nodeScopes.get(node);
+		const binding = scope ? resolveBinding(scope, node.name) : null;
+		return binding === null ? `global:${node.name}` : `binding:${binding.id}`;
+	}
+	if (node?.type === 'ChainExpression') return dependencyExpressionKey(node.expression, analysis);
+	if (node?.type === 'MemberExpression') {
+		const object = dependencyExpressionKey(node.object, analysis);
+		const property = node.computed ? unwrapValue(node.property) : null;
+		const name = node.computed
+			? property?.type === 'Literal' && ['string', 'number'].includes(typeof property.value)
+				? String(property.value)
+				: null
+			: node.property?.name;
+		return object === null || name == null
+			? null
+			: `${object}${node.optional ? '?' : ''}[${JSON.stringify(name)}]`;
+	}
+	return null;
+}
+
+function equivalentStrongDependencies(authored, callback, inferred, analysis) {
+	if (authored?.type !== 'ArrayExpression' || inferred === null) return false;
+	const expected = [];
+	for (const dependency of inferred) {
+		// Inference selects either an own method or its receiver at runtime.
+		// A handwritten member cannot prove equality with that conditional value.
+		if (dependency.method) return false;
+		const key = dependencyExpressionKey(dependency.node, analysis);
+		if (key === null) return false;
+		expected.push(key);
+	}
+	const actual = [];
+	for (const dependency of authored.elements) {
+		const key = dependencyExpressionKey(dependency, analysis);
+		if (key === null) return false;
+		actual.push(key);
+	}
+	// Dependency values are also callback arguments in Octane. For callbacks
+	// that observe those arguments (including opaque references), position and
+	// duplicate entries are observable and cannot be reduced to a set.
+	if (callback?.type !== 'ArrowFunctionExpression' || callback.params.length > 0) {
+		return (
+			actual.length === expected.length && actual.every((key, index) => key === expected[index])
+		);
+	}
+	const actualSet = new Set(actual);
+	return actualSet.size === new Set(expected).size && expected.every((key) => actualSet.has(key));
+}
+
+/**
+ * Read-only policy records for authored built-in hooks in an enabled Strong
+ * module. The caller owns module opt-in, diagnostic locations, and severity.
+ * Compatibility compilation never invokes this additional lexical analysis.
+ * @param {any} ast
+ * @param {{ onlyImported?: boolean, hookRuntimeModules?: readonly string[], nativeReads?: boolean }} [options]
+ */
+export function analyzeStrongHookPolicies(ast, options = {}) {
+	const analysis = buildScopes(
+		ast,
+		options.onlyImported === true,
+		new Set([
+			'octane',
+			...(options.nativeReads ? ['octane/signals/client', 'octane/signals/server'] : []),
+			...(options.hookRuntimeModules ?? []),
+		]),
+	);
+	const nameFor = strongHookNameResolver(analysis, options.onlyImported === true);
+	const diagnostics = [];
+	let markedInvariants = false;
+	for (const { call, scope } of analysis.calls) {
+		const name = nameFor(call, scope);
+		const config = DEPENDENCY_HOOKS.get(name);
+		if (config === undefined) continue;
+		if (name === 'useMemo' || name === 'useCallback') {
+			diagnostics.push({
+				code: 'OCTANE_STRONG_MANUAL_MEMO',
+				node: call,
+				severity: 'error',
+				message: `Strong mode owns calculation and callback caching. Replace ${name} with a const declaration and let the compiler track its inputs.`,
+			});
+			continue;
+		}
+		const argument = call.arguments[config.deps];
+		if (argument === undefined) continue;
+		const authored = unwrapValue(argument);
+		if (
+			(authored?.type === 'Literal' && authored.value === null) ||
+			authored?.type === 'NullLiteral'
+		) {
+			diagnostics.push({
+				code: 'OCTANE_STRONG_UNTRACKED_EFFECT',
+				node: argument,
+				severity: 'error',
+				message:
+					'Strong mode does not allow null dependency lists. Omit the dependency argument so the compiler tracks the callback’s reactive inputs.',
+			});
+			continue;
+		}
+		let equivalent = false;
+		if (authored?.type === 'ArrayExpression') {
+			if (!markedInvariants) {
+				markDependencyInvariantBindings(analysis);
+				markedInvariants = true;
+			}
+			const callback = unwrapValue(call.arguments[config.callback]);
+			const inferred = isFunction(callback)
+				? collectDependencies(callback, analysis.functionScopes.get(callback) ?? null, analysis)
+				: collectCallbackReference(callback, analysis);
+			equivalent = equivalentStrongDependencies(authored, callback, inferred, analysis);
+		}
+		diagnostics.push({
+			code: 'OCTANE_STRONG_EXPLICIT_DEPENDENCIES',
+			node: argument,
+			severity: equivalent ? 'hint' : 'error',
+			message: equivalent
+				? 'This dependency array is redundant: the compiler infers the same inputs. Omit the dependency argument.'
+				: 'Strong mode owns dependency inference. Omit this dependency argument; its values are not proven equivalent to the callback’s inferred inputs.',
+		});
+	}
+	if (hasInlineMemoDirectEval(ast)) {
+		const { candidates } = analyzeStrongMemoCandidates(ast, options, analysis);
+		const first = candidates.keys().next().value;
+		if (first)
+			diagnostics.push({
+				code: STRONG_AUTOMATIC_MEMO_UNSUPPORTED,
+				node: first.init,
+				severity: 'error',
+				message: STRONG_MEMO_EVAL_MESSAGE,
+			});
+	}
+	return diagnostics;
+}
+
 /**
  * Copy-on-write rebuild carrying hook metadata: every call the scope walk
  * annotated is replaced by a shallow copy stamped with its `_octane*` props
@@ -1650,4 +1847,371 @@ export function applyHookDependencies(ast, options = {}) {
 		}
 	}
 	return rebuildWithHookMetadata(ast, analysis, inferred, true, options.nativeReads === true).ast;
+}
+
+/**
+ * Candidates for Strong's declaration-level caching. Hook inference owns the
+ * lexical and capture proof so generated caches use the same dependency ABI as
+ * authored hooks. Mutable local objects and late-bound captures retain normal
+ * JavaScript evaluation; caching them would change their lifetime or read TDZs.
+ */
+export function analyzeStrongMemoCandidates(ast, options = {}, existingAnalysis = null) {
+	const analysis =
+		existingAnalysis ??
+		buildScopes(
+			ast,
+			false,
+			new Set([
+				'octane',
+				...(options.nativeReads ? ['octane/signals/client', 'octane/signals/server'] : []),
+				...(options.hookRuntimeModules ?? []),
+			]),
+		);
+	markDependencyInvariantBindings(analysis);
+	const hookName = strongHookNameResolver(analysis, false);
+	const importedHookName = strongHookNameResolver(analysis, true);
+	const hookCalls = new Map();
+	for (const { call, scope, trustedConfig } of analysis.calls) {
+		const name = importedHookName(call, scope);
+		if (DEPENDENCY_HOOKS.has(name) && (!trustedConfig || call.optional)) hookCalls.set(call, name);
+	}
+	const owners = new Map(analysis.functions.map((record) => [record.scope, record]));
+	const functions = new Map(
+		analysis.functions.filter((record) => record.binding).map((record) => [record.binding, record]),
+	);
+	const declarations = new Map();
+	const aliases = new Map();
+	function connectAlias(binding, target) {
+		if (!binding || !target || binding === target) return;
+		if (!aliases.has(binding)) aliases.set(binding, new Set());
+		if (!aliases.has(target)) aliases.set(target, new Set());
+		aliases.get(binding).add(target);
+		aliases.get(target).add(binding);
+	}
+	function sharedBindings(node, targets) {
+		const value = unwrapValue(node);
+		if (!value) return;
+		if (['Identifier', 'MemberExpression', 'ChainExpression'].includes(value.type)) {
+			const target = rootBinding(value);
+			if (target) targets.add(target);
+		} else if (value.type === 'ObjectExpression')
+			for (const prop of value.properties) sharedBindings(prop.argument ?? prop.value, targets);
+		else if (value.type === 'ArrayExpression')
+			for (const item of value.elements) sharedBindings(item?.argument ?? item, targets);
+		else if (value.type === 'ConditionalExpression') {
+			sharedBindings(value.consequent, targets);
+			sharedBindings(value.alternate, targets);
+		} else if (value.type === 'LogicalExpression') {
+			sharedBindings(value.left, targets);
+			sharedBindings(value.right, targets);
+		} else if (['CallExpression', 'NewExpression'].includes(value.type))
+			for (const arg of value.arguments) sharedBindings(arg.argument ?? arg, targets);
+	}
+
+	for (const record of analysis.declarators) {
+		for (const { binding } of record.bindings) declarations.set(binding, record.decl);
+		const initial = unwrapValue(record.decl.init);
+		if (record.kind === 'const') {
+			const targets = new Set();
+			sharedBindings(initial, targets);
+			for (const { binding } of record.bindings)
+				for (const target of targets) connectAlias(binding, target);
+		}
+	}
+	const names = new Set();
+	const referenced = new Set();
+	const bindingNodes = new WeakSet();
+	function markBindingNodes(pattern) {
+		if (!pattern) return;
+		if (pattern.type === 'Identifier') bindingNodes.add(pattern);
+		else if (pattern.type === 'ObjectPattern')
+			for (const prop of pattern.properties) markBindingNodes(prop.argument ?? prop.value);
+		else if (pattern.type === 'ArrayPattern')
+			for (const item of pattern.elements) markBindingNodes(item);
+		else if (pattern.type === 'AssignmentPattern') markBindingNodes(pattern.left);
+		else if (pattern.type === 'RestElement') markBindingNodes(pattern.argument);
+	}
+	for (const { decl } of analysis.declarators) markBindingNodes(decl.id);
+	for (const { node } of analysis.functions) {
+		if (node.id) bindingNodes.add(node.id);
+		for (const param of node.params) markBindingNodes(param);
+	}
+
+	const mutated = new Set();
+	const inLoop = new WeakSet();
+	const mutationMethods = new Set([
+		'copyWithin',
+		'fill',
+		'pop',
+		'push',
+		'reverse',
+		'shift',
+		'sort',
+		'splice',
+		'unshift',
+		'set',
+		'delete',
+		'clear',
+		'add',
+	]);
+	function rootBinding(node) {
+		let value = unwrapValue(node);
+		while (value?.type === 'MemberExpression' || value?.type === 'ChainExpression')
+			value = unwrapValue(value.object ?? value.expression);
+		return value?.type === 'Identifier'
+			? resolveBinding(analysis.nodeScopes.get(value) ?? null, value.name)
+			: null;
+	}
+	function markMutation(target) {
+		const value = unwrapValue(target);
+		if (!value) return;
+		if (value.type === 'ArrayPattern') for (const item of value.elements) markMutation(item);
+		else if (value.type === 'ObjectPattern')
+			for (const prop of value.properties) markMutation(prop.argument ?? prop.value);
+		else if (value.type === 'AssignmentPattern') markMutation(value.left);
+		else if (value.type === 'RestElement') markMutation(value.argument);
+		else {
+			const binding = rootBinding(value);
+			if (binding) mutated.add(binding);
+		}
+	}
+	function scan(node, loop = false, parent = null, parentKey = null) {
+		if (!node || typeof node !== 'object') return;
+		if (Array.isArray(node)) {
+			for (const child of node) scan(child, loop, parent, parentKey);
+			return;
+		}
+		if (node.type === 'Identifier') {
+			names.add(node.name);
+			const structural =
+				bindingNodes.has(node) ||
+				parent?.type?.startsWith('Import') ||
+				(parent?.type === 'MemberExpression' && parentKey === 'property' && !parent.computed) ||
+				(['Property', 'MethodDefinition', 'PropertyDefinition'].includes(parent?.type) &&
+					parentKey === 'key' &&
+					!parent.computed) ||
+				(parent?.type === 'LabeledStatement' && parentKey === 'label') ||
+				['BreakStatement', 'ContinueStatement', 'MetaProperty'].includes(parent?.type);
+			if (!structural) {
+				const binding = resolveBinding(analysis.nodeScopes.get(node) ?? null, node.name);
+				if (binding) referenced.add(binding);
+			}
+		}
+
+		if (isFunction(node)) loop = false;
+		if (
+			[
+				'ForStatement',
+				'ForInStatement',
+				'ForOfStatement',
+				'WhileStatement',
+				'DoWhileStatement',
+			].includes(node.type)
+		)
+			loop = true;
+		if (loop && node.type === 'VariableDeclarator') inLoop.add(node);
+		if (
+			node.type === 'AssignmentExpression' ||
+			node.type === 'UpdateExpression' ||
+			(node.type === 'UnaryExpression' && node.operator === 'delete')
+		) {
+			markMutation(node.left ?? node.argument);
+		}
+		if (
+			['ForInStatement', 'ForOfStatement'].includes(node.type) &&
+			node.left?.type !== 'VariableDeclaration'
+		)
+			markMutation(node.left);
+		if (node.type === 'CallExpression') {
+			const member = unwrapValue(node.callee);
+			const method = member?.computed ? member.property?.value : member?.property?.name;
+			if (
+				member?.object?.type === 'Identifier' &&
+				((member.object.name === 'Object' &&
+					['assign', 'defineProperty', 'defineProperties', 'setPrototypeOf'].includes(method)) ||
+					(member.object.name === 'Reflect' &&
+						['set', 'deleteProperty', 'defineProperty', 'setPrototypeOf'].includes(method)))
+			)
+				markMutation(node.arguments[0]);
+			if (
+				member?.type === 'MemberExpression' &&
+				mutationMethods.has(member.computed ? member.property?.value : member.property?.name)
+			) {
+				const binding = rootBinding(member.object);
+				if (binding) mutated.add(binding);
+			}
+		}
+		for (const key in node)
+			if (!AST_META_KEYS.has(key) && key !== 'typeAnnotation' && key !== 'returnType')
+				scan(node[key], loop, node, key);
+	}
+	scan(ast);
+	const mutationQueue = [...mutated];
+	for (let index = 0; index < mutationQueue.length; index++) {
+		for (const related of aliases.get(mutationQueue[index]) ?? []) {
+			if (!mutated.has(related)) {
+				mutated.add(related);
+				mutationQueue.push(related);
+			}
+		}
+	}
+	function hasOwnJSX(node, root = true) {
+		if (!node || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some((child) => hasOwnJSX(child, false));
+		if (!root && isFunction(node)) return false;
+		if (['JSXCodeBlock', 'JSXElement', 'JSXFragment'].includes(node.type)) return true;
+		for (const key in node) if (!AST_META_KEYS.has(key) && hasOwnJSX(node[key], false)) return true;
+		return false;
+	}
+	const hookSummaries = new Map();
+	function executesHook(node, active = new Set(), root = true) {
+		if (!node || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some((child) => executesHook(child, active, false));
+		if (!root && isFunction(node)) return false;
+		if (node.type === 'CallExpression') {
+			const name = hookName(node, analysis.nodeScopes.get(node));
+			if (/^use(?:[A-Z]|$)/.test(name ?? '')) return true;
+			const callee = unwrapValue(node.callee);
+
+			const binding = directCallBinding(node, analysis.nodeScopes.get(node));
+			if (binding?.customHookImport) return true;
+			const record = functions.get(binding);
+			if (record && active.has(record)) return true;
+			if (record) {
+				if (!hookSummaries.has(record)) {
+					active.add(record);
+					hookSummaries.set(record, executesHook(record.node.body, active));
+					active.delete(record);
+				}
+				if (hookSummaries.get(record)) return true;
+			}
+			if (isFunction(callee) && executesHook(callee.body, active)) return true;
+		}
+		for (const key in node)
+			if (!AST_META_KEYS.has(key) && executesHook(node[key], active, false)) return true;
+		return false;
+	}
+	function prohibited(node, root = true) {
+		if (!node || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some((child) => prohibited(child, false));
+		if (!root && isFunction(node)) return false;
+		if (
+			[
+				'AwaitExpression',
+				'YieldExpression',
+				'AssignmentExpression',
+				'UpdateExpression',
+				'ThisExpression',
+				'Super',
+				'ImportExpression',
+			].includes(node.type) ||
+			node.type?.startsWith('JSX')
+		)
+			return true;
+		if (node.type === 'Identifier' && node.name === 'arguments') return true;
+		for (const key in node)
+			if (!AST_META_KEYS.has(key) && prohibited(node[key], false)) return true;
+		return false;
+	}
+	function capturesLexicalReceiver(node, root = true) {
+		if (!node || typeof node !== 'object') return false;
+		if (Array.isArray(node)) return node.some((child) => capturesLexicalReceiver(child, false));
+		if (!root && ['FunctionExpression', 'FunctionDeclaration'].includes(node.type)) return false;
+		if (['ThisExpression', 'Super', 'MetaProperty'].includes(node.type)) return true;
+		for (const key in node)
+			if (!AST_META_KEYS.has(key) && capturesLexicalReceiver(node[key], false)) return true;
+		return false;
+	}
+	function createsIdentity(node) {
+		const value = unwrapValue(node);
+		if (!value) return false;
+		if (
+			[
+				'ObjectExpression',
+				'ArrayExpression',
+				'FunctionExpression',
+				'ArrowFunctionExpression',
+				'CallExpression',
+				'NewExpression',
+				'TaggedTemplateExpression',
+			].includes(value.type)
+		)
+			return true;
+		if (value.type === 'ChainExpression') return createsIdentity(value.expression);
+		if (value.type === 'ConditionalExpression')
+			return createsIdentity(value.consequent) || createsIdentity(value.alternate);
+		if (value.type === 'LogicalExpression')
+			return createsIdentity(value.left) || createsIdentity(value.right);
+		return false;
+	}
+	const renderOwners = new Map();
+	function ownsRender(record) {
+		if (!renderOwners.has(record))
+			renderOwners.set(
+				record,
+				/^use[A-Z]/.test(record.binding?.name ?? record.node.id?.name ?? '') ||
+					hasOwnJSX(record.node),
+			);
+		return renderOwners.get(record);
+	}
+	const candidates = new Map();
+	for (const { decl, kind, bindings } of analysis.declarators) {
+		const initial = unwrapValue(decl.init);
+		if (
+			!bindings.some(({ binding }) => referenced.has(binding)) ||
+			kind !== 'const' ||
+			!createsIdentity(initial) ||
+			inLoop.has(decl) ||
+			bindings.some(({ binding }) => binding.reassigned || mutated.has(binding))
+		)
+			continue;
+		if (['Identifier', 'Literal', 'MemberExpression', 'ChainExpression'].includes(initial.type)) {
+			if (
+				initial.type !== 'ChainExpression' ||
+				!['CallExpression', 'NewExpression'].includes(initial.expression?.type)
+			)
+				continue;
+		}
+		const owner = owners.get(nearestFunctionScope(analysis.nodeScopes.get(decl)));
+		if (!owner || !ownsRender(owner)) continue;
+		const callback = isFunction(initial);
+		if (
+			(!callback && (prohibited(initial) || executesHook(initial))) ||
+			(initial.type === 'ArrowFunctionExpression' && capturesLexicalReceiver(initial))
+		)
+			continue;
+		const dependencies = collectDependencies(
+			initial,
+			callback ? (analysis.functionScopes.get(initial) ?? null) : null,
+			analysis,
+		);
+		if (
+			dependencies.some(({ binding }) => {
+				const enclosingFunction = owners.get(nearestFunctionScope(binding.scope));
+				if (
+					!callback &&
+					enclosingFunction &&
+					enclosingFunction.node.start >= initial.start &&
+					enclosingFunction.node.end <= initial.end
+				)
+					return false;
+				const declaration = declarations.get(binding);
+				if (
+					!callback &&
+					declaration &&
+					declaration.start >= initial.start &&
+					declaration.end <= initial.end
+				)
+					return false;
+				return (
+					binding.reassigned ||
+					mutated.has(binding) ||
+					(declaration && declaration.start >= decl.start)
+				);
+			})
+		)
+			continue;
+		candidates.set(decl, callback ? 'useCallback' : 'useMemo');
+	}
+	return { candidates, names, hookCalls };
 }

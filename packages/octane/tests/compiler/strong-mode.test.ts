@@ -18,6 +18,27 @@ const EFFECT_EVENT_DEPENDENCY = 'OCTANE_STRONG_EFFECT_EVENT_DEPENDENCY';
 const DIRECTIVE_PLACEMENT = 'OCTANE_STRONG_DIRECTIVE_PLACEMENT';
 const HOOK_LOCALITY = 'OCTANE_STRONG_HOOK_LOCALITY';
 const EVENT_HANDLER_LOCALITY = 'OCTANE_STRONG_EVENT_HANDLER_LOCALITY';
+const MANUAL_MEMO = 'OCTANE_STRONG_MANUAL_MEMO';
+const EXPLICIT_DEPENDENCIES = 'OCTANE_STRONG_EXPLICIT_DEPENDENCIES';
+
+// These fixtures exercise phase analysis of legacy memo callbacks. Strong now
+// rejects manual memo authoring, but must still distinguish callback creation
+// from invocation and must never invent a render/effect violation.
+function expectPhaseSafeLegacyMemo(source: string, filename = '/src/App.tsrx') {
+	const diagnostics = compileToVolarMappings(source, filename).diagnostics;
+	const errors = diagnostics.filter(({ severity }) => severity === 'error');
+	expect(
+		errors.filter(({ code }) => code !== MANUAL_MEMO && code !== EXPLICIT_DEPENDENCIES),
+	).toEqual([]);
+	if (errors.length > 0) {
+		expect(errors).toContainEqual(expect.objectContaining({ code: MANUAL_MEMO }));
+		expect(() => compile(source, filename)).toThrow(
+			/OCTANE_STRONG_(MANUAL_MEMO|EXPLICIT_DEPENDENCIES)/,
+		);
+	} else {
+		expect(() => compile(source, filename)).not.toThrow();
+	}
+}
 
 describe('Strong mode immutable render inputs', () => {
 	const component = (
@@ -197,7 +218,7 @@ export function App(props) @{
 import { useState, useEffect } from 'octane';
 export function App() @{
   const [state, setState] = useState({ count: 0 });
-  useEffect(() => { const local = { count: state.count }; local.count++; }, [state]);
+  useEffect(() => { const local = { count: state.count }; local.count++; });
   <button onClick={() => setState({ count: state.count + 1 })}>{state.count as string}</button>
 }`;
 		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
@@ -324,7 +345,7 @@ export function Fixed() @{ const date = new Date(0); <div>{date.getTime() as str
 		const source = `"use strong";
 import { useEffect } from 'octane';
 export function App() @{
-  useEffect(() => { Date.now(); Math.random(); performance.now(); }, []);
+  useEffect(() => { Date.now(); Math.random(); performance.now(); });
   setTimeout(() => new Date(), 0);
   <button onClick={() => Date.now()}>Read clock</button>
 }`;
@@ -398,7 +419,7 @@ export function App(props) @{
 import { useEffect, useState } from 'octane';
 export function App(props) @{
   const [count, setCount] = useState(0);
-  useEffect(() => props.observe(count), [count]);
+  useEffect(() => props.observe(count));
   <div>
     @if (props.show) {
       <button onClick={() => setCount(count + 1)}>{count as string}</button>
@@ -417,7 +438,7 @@ import { useEffect, useState } from 'octane';
 export function App(props) @{
   const [count] = useState(0);
   <div>@if (props.show) {
-    useEffect(() => props.observe(count), [count]);
+    useEffect(() => props.observe(count));
     <span>shown</span>
   }</div>
 }`;
@@ -431,7 +452,7 @@ import { useEffect, useState } from 'octane';
 export function App(props) @{
   const [count, setCount] = useState(0);
   const [shared] = useState(0);
-  useEffect(() => props.observe(count, shared), [count, shared]);
+  useEffect(() => props.observe(count, shared));
   <div>
     <output>{shared as string}</output>
     @if (props.show) { <button onClick={() => setCount(count + 1)}>{count as string}</button> }
@@ -446,8 +467,8 @@ import { useEffect, useState } from 'octane';
 export function App(props) @{
   const [count, setCount] = useState(0);
   const [shared] = useState(0);
-  useEffect(() => props.observe(count), [count]);
-  useEffect(() => props.observe(count, shared), [count, shared]);
+  useEffect(() => props.observe(count));
+  useEffect(() => props.observe(count, shared));
   <div>
     <output>{shared as string}</output>
     @if (props.show) { <button onClick={() => setCount(count + 1)}>{count as string}</button> }
@@ -463,8 +484,8 @@ export function App(props) @{
   const [count, setCount] = useState(0);
   const [observed] = useState(0);
   const [shared] = useState(0);
-  useEffect(() => props.observe(count, observed), [count, observed]);
-  useEffect(() => props.observe(observed, shared), [observed, shared]);
+  useEffect(() => props.observe(count, observed));
+  useEffect(() => props.observe(observed, shared));
   <div>
     <output>{shared as string}</output>
     @if (props.show) { <button onClick={() => setCount(count + 1)}>{count as string}</button> }
@@ -479,7 +500,7 @@ import { useEffect, useState } from 'octane';
 export function App(props) @{
   const [count, setCount] = useState(0);
   const [observed] = useState(0);
-  useEffect(() => props.observe(count, observed), [count, observed]);
+  useEffect(() => props.observe(count, observed));
   <div>@if (props.show) { <button onClick={() => setCount(count + 1)}>{count as string}</button> }</div>
 }`;
 		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
@@ -493,8 +514,8 @@ export function App(props) @{
   const [left] = useState(0);
   const [right] = useState(0);
   const [shared] = useState(0);
-  useEffect(() => props.observe(left, shared), [left, shared]);
-  useEffect(() => props.observe(right, shared), [right, shared]);
+  useEffect(() => props.observe(left, shared));
+  useEffect(() => props.observe(right, shared));
   <div>
     @if (props.left) { <output>{left as string}</output> }
     @if (props.right) { <output>{right as string}</output> }
@@ -510,11 +531,11 @@ export function App(props) @{
   const [outer] = useState(0);
   const [inner] = useState(0);
   const [shared] = useState(0);
-  useEffect(() => props.observe(outer, shared), [outer, shared]);
-  useEffect(() => props.observe(inner, shared), [inner, shared]);
+  useEffect(() => props.observe(outer, shared));
+  useEffect(() => props.observe(inner, shared));
   <div>@if (props.show) {
-    <output>{outer as string}</output>
-    @if (props.nested) { <output>{inner as string}</output> }
+    <><output>{outer as string}</output>
+    @if (props.nested) { <output>{inner as string}</output> }</>
   }</div>
 }`;
 		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
@@ -527,7 +548,7 @@ export function App(props) @{
   <div>
     @if (props.show) {
       const [count, setCount] = useState(0);
-      useEffect(() => props.observe(count), [count]);
+      useEffect(() => props.observe(count));
       <button onClick={() => setCount(count + 1)}>{count as string}</button>
     }
   </div>
@@ -592,7 +613,7 @@ export function App(props) @{
 			`"use strong";
 import { useState } from 'octane';
 export function Choices(props) @{
-  const [selected, setSelected] = useState(props.initial);
+  const [selected, setSelected] = useState(() => props.initial);
   <ul>@for (const choice of props.choices; key choice.id) {
     <li><button aria-pressed={selected === choice.id} onClick={() => setSelected(choice.id)}>{choice.label as string}</button></li>
   }</ul>
@@ -632,8 +653,8 @@ export function App(props) @{
 import { useCallback, useMemo, useState } from 'octane';
 export function App() @{
   const [count, setCount] = useState(0);
-  const doubled = useMemo(() => count * 2, [count]);
-  const increment = useCallback(() => setCount(count + 1), [count]);
+  const doubled = useMemo(() => count * 2);
+  const increment = useCallback(() => setCount(count + 1));
   <div>@{ <button onClick={increment}>{doubled as string}</button> }</div>
 }`;
 		const diagnostics = compileToVolarMappings(source, '/src/App.tsrx').diagnostics;
@@ -657,7 +678,12 @@ export function App(props) @{
   <div>@{ <span>{value.name as string}</span> }</div>
 }`;
 		const diagnostics = compileToVolarMappings(source, '/src/App.tsrx').diagnostics;
-		expect(diagnostics.map(({ code }) => code)).toEqual([HOOK_LOCALITY]);
+		expect(
+			diagnostics
+				.filter(({ code }) => code === HOOK_LOCALITY || code === EVENT_HANDLER_LOCALITY)
+				.map(({ code }) => code),
+		).toEqual([HOOK_LOCALITY]);
+		expect(diagnostics).toContainEqual(expect.objectContaining({ code: MANUAL_MEMO }));
 		expect(() => compile(source, '/src/App.tsrx')).toThrow(HOOK_LOCALITY);
 	});
 
@@ -703,7 +729,7 @@ import { useEffect, useState } from 'octane';
 export function App(props) @{
   const [count] = useState(0);
   function observe() { props.record(count); }
-  useEffect(observe, [count]);
+  useEffect(observe);
   <div>@{ <output>{count as string}</output> }</div>
 }`;
 		const diagnostics = compileToVolarMappings(source, '/src/App.tsrx').diagnostics;
@@ -763,7 +789,7 @@ export function App() @{
 	it('keeps a hook used by a parent custom effect hook above a nested block', () => {
 		const source = `"use strong";
 import { useEffect, useState } from 'octane';
-function useObserve(value, observe) { useEffect(() => observe(value), [value]); }
+function useObserve(value, observe) { useEffect(() => observe(value)); }
 export function App(props) @{
   const [count] = useState(0);
   useObserve(count, props.observe);
@@ -814,7 +840,7 @@ export function App() @{
 		const source = `"use strong";
 import { useState } from 'octane';
 export function App(props) @{
-  const [count] = useState(0);
+  var [count] = useState(0);
   <div>@{
     if (props.ready) { var count = 1; }
     <span>{count as string}</span>
@@ -969,7 +995,7 @@ import { useEffect, useState } from 'octane';
 export function App(props) @{
   const [count] = useState(0);
   ${helper}
-  ${withEffect ? 'useEffect(() => props.observe(count), [count]);' : ''}
+  ${withEffect ? 'useEffect(() => props.observe(count));' : ''}
   <div>@{ <span>{count as string}</span> }</div>
 }`;
 		const diagnostics = compileToVolarMappings(source, '/src/App.tsrx').diagnostics;
@@ -987,8 +1013,8 @@ export function App(props) @{
 		expect(() => compile(source, '/src/App.tsrx')).toThrow(HOOK_LOCALITY);
 
 		const fixed = source.replace(
-			`  const [count] = useState(0);\n  ${helper}\n  ${withEffect ? 'useEffect(() => props.observe(count), [count]);' : ''}\n  <div>@{ <span>{count as string}</span> }</div>`,
-			`  <div>@{\n    const [count] = useState(0);\n    ${withEffect ? 'useEffect(() => props.observe(count), [count]);' : ''}\n    <span>{count as string}</span>\n  }</div>`,
+			`  const [count] = useState(0);\n  ${helper}\n  ${withEffect ? 'useEffect(() => props.observe(count));' : ''}\n  <div>@{ <span>{count as string}</span> }</div>`,
+			`  <div>@{\n    const [count] = useState(0);\n    ${withEffect ? 'useEffect(() => props.observe(count));' : ''}\n    <span>{count as string}</span>\n  }</div>`,
 		);
 		for (const mode of ['client', 'server'] as const) {
 			expect(() => compile(fixed, '/src/App.tsrx', { mode })).not.toThrow();
@@ -1070,7 +1096,7 @@ export function App(props) @{
   const [root] = useState(0);
   const [count] = useState(0);
   const read = () => count;
-  useEffect(() => props.observe(root, read()), [root, read]);
+  useEffect(() => props.observe(root, read()));
   <div><output>{root as string}</output>@{ <span>{count as string}</span> }</div>
 }`;
 		for (const mode of ['client', 'server'] as const) {
@@ -1097,7 +1123,7 @@ export function Label() @{
 import { useEffect, useState } from 'octane';
 export function Counter({ title, observe }) @{
   const [count, setCount] = useState(0);
-  useEffect(() => observe(count), [count]);
+  useEffect(() => observe(count));
   <div>
     <h2>{title as string}</h2>
     @{
@@ -1136,7 +1162,7 @@ export function Counter({ title, observe }) @{
     <h2>{title as string}</h2>
     @{
       const [count, setCount] = useState(0);
-      useEffect(() => observe(count), [count]);
+      useEffect(() => observe(count));
       const onClick = () => setCount(count + 1);
       <button {onClick}>{count as string}</button>
     }
@@ -1227,7 +1253,7 @@ export function App(props) @{
 		const source = `"use strong";
 export function App() @{
   ${helpers.join('\n  ')}
-  <div>@{ <button onClick={h0}>first</button><button onClick={h${length}}>last</button> }</div>
+  <div>@{ <><button onClick={h0}>first</button><button onClick={h${length}}>last</button></> }</div>
 }`;
 		const diagnostics = compileToVolarMappings(source, '/src/App.tsrx').diagnostics;
 		expect(diagnostics.filter(({ code }) => code === EVENT_HANDLER_LOCALITY)).toHaveLength(2);
@@ -2456,7 +2482,7 @@ export function App(props) @{
   <div />
 }`;
 
-		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(source, '/src/App.tsrx');
 	});
 
 	it.each([
@@ -2767,7 +2793,7 @@ export function App(props) @{
   <div />
 }`;
 
-		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(source, '/src/App.tsrx');
 	});
 
 	it('publishes named memo state updates as editor errors', () => {
@@ -2938,7 +2964,7 @@ export function App() @{
 		'rejects synchronous state updates in %s setup',
 		(effect) => {
 			const source = `"use strong";\n${stateComponent(
-				`${effect}(() => { setCount(count + 1); }, [count]);`,
+				`${effect}(() => { setCount(count + 1); });`,
 				`useState, ${effect}`,
 			)}`;
 
@@ -3010,12 +3036,12 @@ export function App() @{
   <div />
 }`;
 
-		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(source, '/src/App.tsrx');
 	});
 
 	it('catches synchronous local callback invocation inside effect setup', () => {
 		const source = `"use strong";\n${stateComponent(
-			'useEffect(() => { const apply = () => setCount(1); apply(); }, []);',
+			'useEffect(() => { const apply = () => setCount(1); apply(); });',
 			'useState, useEffect',
 		)}`;
 
@@ -3034,7 +3060,7 @@ export function App() @{
 import { useEffect, useState } from 'octane';
 export function App(props) @{
   const [, setCount] = useState(0);
-  useEffect(() => { ${invocation} }, []);
+  useEffect(() => { ${invocation} });
   <div />
 }`;
 
@@ -3043,10 +3069,10 @@ export function App(props) @{
 
 	it.each([
 		['effect callbacks', 'useEffect(update, []);'],
-		['direct calls in effect setup', 'useEffect(() => { update(1); }, []);'],
+		['direct calls in effect setup', 'useEffect(() => { update(1); });'],
 		[
 			'concatenated tuple indexes in effect setup',
-			'useEffect(() => { const index = "" + "1"; const selected = tuple[index]; selected(1); }, []);',
+			'useEffect(() => { const index = "" + "1"; const selected = tuple[index]; selected(1); });',
 		],
 	])('rejects aliased tuple setters used as %s', (_label, effect) => {
 		const source = `"use strong";
@@ -3077,7 +3103,7 @@ export function App(props) @{
       await Promise.resolve();
       (props.trace, setCount)(1);
     })();
-  }, []);
+  });
   <div />
 }`;
 
@@ -3090,7 +3116,7 @@ export function App(props) @{
       setTimeout(() => setCount(count + 1), 0);
       Promise.resolve().then(() => setCount(count + 1));
       return () => setCount(count + 1);
-    }, [count]);`,
+    });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3099,7 +3125,7 @@ export function App(props) @{
 
 	it('allows state updates after an async function has yielded', () => {
 		const effect = `"use strong";\n${stateComponent(
-			'useEffect(() => { (async () => { await Promise.resolve(); setCount(1); })(); }, []);',
+			'useEffect(() => { (async () => { await Promise.resolve(); setCount(1); })(); });',
 			'useState, useEffect',
 		)}`;
 		const render = `"use strong";\n${stateComponent(
@@ -3112,7 +3138,7 @@ export function App(props) @{
 			'(async () => { setCount(await Promise.resolve(1)); })();',
 		)}`;
 		const effectAwaitedArgument = `"use strong";\n${stateComponent(
-			'useEffect(() => { (async () => { setCount(await Promise.resolve(1)); })(); }, []);',
+			'useEffect(() => { (async () => { setCount(await Promise.resolve(1)); })(); });',
 			'useState, useEffect',
 		)}`;
 		const conditional = `"use strong";\n${stateComponent(
@@ -3180,11 +3206,11 @@ export function App(props) @{
 	])('allows updates after guaranteed awaits in nested %s', (_label, body) => {
 		const render = `"use strong";\n${stateComponent(`(async () => { ${body} })();`)}`;
 		const effect = `"use strong";\n${stateComponent(
-			`useEffect(() => { (async () => { ${body} })(); }, [count]);`,
+			`useEffect(() => { (async () => { ${body} })(); });`,
 			'useState, useEffect',
 		)}`;
 		const asyncEffect = `"use strong";\n${stateComponent(
-			`useEffect(async () => { ${body} }, [count]);`,
+			`useEffect(async () => { ${body} });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3320,11 +3346,11 @@ export function App(props) @{
 	])('allows expression updates after guaranteed yields in %s', (_label, body) => {
 		const render = `"use strong";\n${stateComponent(`(async () => { ${body} })();`)}`;
 		const effect = `"use strong";\n${stateComponent(
-			`useEffect(() => { (async () => { ${body} })(); }, [count]);`,
+			`useEffect(() => { (async () => { ${body} })(); });`,
 			'useState, useEffect',
 		)}`;
 		const asyncEffect = `"use strong";\n${stateComponent(
-			`useEffect(async () => { ${body} }, [count]);`,
+			`useEffect(async () => { ${body} });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3425,7 +3451,7 @@ export function App(props) @{
 	])('still rejects expression updates in %s', (_label, body) => {
 		const render = `"use strong";\n${stateComponent(`(async () => { ${body} })();`)}`;
 		const effect = `"use strong";\n${stateComponent(
-			`useEffect(async () => { ${body} }, [count]);`,
+			`useEffect(async () => { ${body} });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3446,7 +3472,7 @@ export function App(props) @{
 			'useState, useMemo',
 		)}`;
 
-		expect(() => compile(source, '/src/Counter.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(source, '/src/Counter.tsrx');
 	});
 
 	it('still rejects memo callbacks when awaited arguments can be skipped', () => {
@@ -3508,7 +3534,7 @@ export function App(props) @{
 	])('still rejects %s', (_label, body) => {
 		const render = `"use strong";\n${stateComponent(`(async () => { ${body} })();`)}`;
 		const effect = `"use strong";\n${stateComponent(
-			`useEffect(async () => { ${body} }, [count]);`,
+			`useEffect(async () => { ${body} });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3662,11 +3688,11 @@ export function App(props) @{
 	])('allows updates after guaranteed yields in %s', (_label, body) => {
 		const render = `"use strong";\n${stateComponent(`(async () => { ${body} })();`)}`;
 		const effect = `"use strong";\n${stateComponent(
-			`useEffect(() => { (async () => { ${body} })(); }, [count]);`,
+			`useEffect(() => { (async () => { ${body} })(); });`,
 			'useState, useEffect',
 		)}`;
 		const asyncEffect = `"use strong";\n${stateComponent(
-			`useEffect(async () => { ${body} }, [count]);`,
+			`useEffect(async () => { ${body} });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3795,7 +3821,7 @@ export function App(props) @{
 	])('still rejects updates in %s', (_label, body) => {
 		const render = `"use strong";\n${stateComponent(`(async () => { ${body} })();`)}`;
 		const effect = `"use strong";\n${stateComponent(
-			`useEffect(async () => { ${body} }, [count]);`,
+			`useEffect(async () => { ${body} });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3851,7 +3877,7 @@ export function App() @{
       }
       for (const value of await Promise.resolve([])) {}
       setCount(count + 1);
-    }, [count]);`,
+    });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3869,7 +3895,7 @@ export function useCounter() {
     }
     for (const value of await Promise.resolve([])) {}
     setCount(count + 1);
-  }, [count]);
+  });
   return count;
 }`;
 		const synchronous = source.replace(
@@ -3887,7 +3913,7 @@ export function useCounter() {
       for await (const value of [count]) {
         setCount(value);
       }
-    }, [count]);`,
+    });`,
 			'useState, useEffect',
 		)}`;
 		const synchronous = source.replace(
@@ -3924,7 +3950,7 @@ export function useCounter() {
           setCount(0);
         }
       })();
-    }, [count]);`,
+    });`,
 			'useState, useEffect',
 		)}`;
 
@@ -3946,7 +3972,7 @@ export function useCounter() {
         setCount(0);
       }
     })();
-  }, [count]);
+  });
   return count;
 }`;
 		const synchronous = source.replace(
@@ -3968,7 +3994,7 @@ export function useCounter() {
         await Promise.resolve();
         setCount(0);
       }
-    }, [count]);`,
+    });`,
 			'useState, useEffect',
 		)}`;
 		const result = compileToVolarMappings(source, '/src/Counter.tsrx');
@@ -4001,7 +4027,7 @@ export function useCounter() {
       (await Promise.resolve(count > 0)) ? setCount(1) : setCount(2);
       Promise.resolve(await Promise.resolve(count), setCount(3));
       const { value = setCount(4) } = await Promise.resolve({});
-    }, [count]);`,
+    });`,
 				'useState, useEffect',
 			)}`;
 
@@ -4017,7 +4043,7 @@ export function useCounter() {
   useEffect(async () => {
     (await Promise.resolve(count > 0)) ? setCount(1) : setCount(2);
     Promise.resolve(await Promise.resolve(count), setCount(3));
-  }, [count]);
+  });
   return count;
 }`;
 		const synchronous = source.replace(
@@ -4033,7 +4059,7 @@ export function useCounter() {
 		const source = `"use strong";\n${stateComponent(
 			`useEffect(async () => {
       (await Promise.resolve(count > 0)) ? setCount(1) : setCount(2);
-    }, [count]);`,
+    });`,
 			'useState, useEffect',
 		)}`;
 		const synchronous = source.replace(
@@ -4285,12 +4311,12 @@ export function App(props) @{
     const mounted = ref.current;
     setTimeout(() => ref.current, 0);
     return () => { const cleaned = ref.current; };
-  }, []);
+  });
   (async () => { await Promise.resolve(); const afterYield = ref.current; })();
   <button ref={ref} onClick={() => { const clicked = readLater(); }} />
 }`;
 
-		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(source, '/src/App.tsrx');
 	});
 
 	it.each([
@@ -4542,7 +4568,7 @@ export function App(props) @{
   useEffect(() => {
     props.record(getCount());
     return () => { props.record(getCount()); };
-  }, []);
+  });
   setTimeout(() => props.record(getCount()), 0);
   Promise.resolve().then(() => props.record(getCount()));
   (async () => { await Promise.resolve(); props.record(getCount()); })();
@@ -4550,7 +4576,7 @@ export function App(props) @{
     {count as string}
   </button>
 }`;
-		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(source, '/src/App.tsrx');
 	});
 
 	it.each([
@@ -4904,7 +4930,7 @@ export function App(props) @{
   useEffect(() => {
     props.record(readRevision());
     return () => props.record(revision);
-  }, []);
+  });
   setTimeout(() => props.record(revision), 0);
   Promise.resolve().then(() => props.record(revision));
   (async () => { await Promise.resolve(); props.record(revision); })();
@@ -5335,7 +5361,7 @@ export function App(props) @{
   useEffect(() => {
     props.record(document.visibilityState, readWidth());
     return () => props.record(location.pathname);
-  }, []);
+  });
   setTimeout(() => props.record(navigator.language), 0);
   Promise.resolve().then(() => props.record(localStorage.getItem("theme")));
   (async () => { await Promise.resolve(); props.record(sessionStorage.getItem("theme")); })();
@@ -5675,16 +5701,16 @@ import { ${imports} } from 'octane';
 export function App(props) @{
   const [count, setCount] = useState(0);
   const ref = useRef(0);
-  const update = useCallback(() => setCount(count + 1), [count]);
+  const update = () => setCount(count + 1);
   const event = useEffectEvent(() => setCount(count + 1));
-  const memoized = useMemo(() => () => setCount(count + 1), [count]);
+  const memoized = () => setCount(count + 1);
   useEffect(() => {
+    ref.current = count;
     setTimeout(update, 0);
     Promise.resolve().then(event);
     queueMicrotask(memoized);
     return () => { update(); event(); memoized(); };
-  }, []);
-  useLayoutEffect(() => { ref.current = count; }, [count]);
+  });
   <button ref={props.buttonRef} onClick={event}>{count as string}</button>
 }`;
 
@@ -5700,7 +5726,7 @@ export function App(props) @{
     (async () => { await Promise.resolve(); update(); event(); memoized(); })();
   }, []);`;
 
-		expect(() => compile(`"use strong";\n${component(setup)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(setup)}`, '/src/App.tsrx');
 	});
 
 	it('does not execute a memo-returned callback until the result is invoked', () => {
@@ -5709,7 +5735,7 @@ export function App(props) @{
   const event = useEffectEvent(update);
   useEffect(() => () => event(), []);`;
 
-		expect(() => compile(`"use strong";\n${component(setup)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(setup)}`, '/src/App.tsrx');
 	});
 
 	it.each([
@@ -5746,7 +5772,7 @@ export function App(props) @{
   useEffect(() => () => { iterator.next().value?.(); }, []);`,
 		],
 	])('does not invent synchronous writes from %s', (_label, setup) => {
-		expect(() => compile(`"use strong";\n${component(setup)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(setup)}`, '/src/App.tsrx');
 	});
 
 	it('keeps shadowed hooks and opaque callback results legal', () => {
@@ -5774,7 +5800,7 @@ export function App(props) @{
   <div />
 }`;
 
-		expect(() => compile(source, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(source, '/src/App.tsrx');
 	});
 
 	it('keeps inferred dependencies, ordinary callbacks, and deferred ref writes legal', () => {
@@ -5785,7 +5811,7 @@ export function App(props) @{
   useEffect(() => { write(); }, [callback]);
   useMemo(() => callback, [callback]);`;
 
-		expect(() => compile(`"use strong";\n${component(setup)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(setup)}`, '/src/App.tsrx');
 	});
 
 	it.each([
@@ -5796,7 +5822,7 @@ export function App(props) @{
 		],
 		['short-circuiting', 'const update = useCallback(() => false && setCount(1), []); update();'],
 	])('does not report callback writes made unreachable by %s', (_label, setup) => {
-		expect(() => compile(`"use strong";\n${component(setup)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(setup)}`, '/src/App.tsrx');
 	});
 
 	it.each([
@@ -5875,7 +5901,7 @@ export function App(props) @{
 		expect(() => compile(`"use strong";\n${component(unsafe)}`, '/src/App.tsrx')).toThrow(
 			RENDER_STATE_UPDATE,
 		);
-		expect(() => compile(`"use strong";\n${component(safe)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(safe)}`, '/src/App.tsrx');
 	});
 
 	it('keeps the fallback of an optional factory call reachable', () => {
@@ -5894,7 +5920,7 @@ export function App(props) @{
   const update = useCallback(disabled ? setCount : () => {}, []);
   update(1);`;
 
-		expect(() => compile(`"use strong";\n${component(setup)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(setup)}`, '/src/App.tsrx');
 	});
 
 	it('respects function-hoisted vars that shadow an outer setter', () => {
@@ -6028,7 +6054,7 @@ export function App(props) @{
 		expect(() => compile(`"use strong";\n${component(actual)}`, '/src/App.tsrx')).toThrow(
 			EFFECT_EVENT_DEPENDENCY,
 		);
-		expect(() => compile(`"use strong";\n${component(wrapped)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(wrapped)}`, '/src/App.tsrx');
 	});
 
 	it.each([
@@ -6057,7 +6083,7 @@ export function App(props) @{
 			'function first(recur) { if (recur) return second(false); return () => {}; } function second(recur) { if (recur) return first(false); return () => {}; } const update = useMemo(() => first(true), []); update();',
 		],
 	])('keeps %s legal without inventing synchronous execution', (_label, setup) => {
-		expect(() => compile(`"use strong";\n${component(setup)}`, '/src/App.tsrx')).not.toThrow();
+		expectPhaseSafeLegacyMemo(`"use strong";\n${component(setup)}`, '/src/App.tsrx');
 	});
 
 	it('finishes repeated optional self-return calls and still checks later writes', () => {

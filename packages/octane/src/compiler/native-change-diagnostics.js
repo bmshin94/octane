@@ -263,15 +263,16 @@ function hostLabel(tag, type) {
 	return tag === 'textarea' ? '<textarea>' : `<input type="${type.display}">`;
 }
 
-function diagnosticFor(source, filename, tag, type, changeAttributes, controlled) {
+function diagnosticFor(source, filename, tag, type, changeAttributes, controlled, strong) {
 	const first = changeAttributes[0];
 	const captureOnly = attributeName(first) === 'onChangeCapture';
 	const replacement = captureOnly ? 'onInputCapture' : 'onInput';
 	let message =
 		`[${NATIVE_TEXT_ONCHANGE_DIAGNOSTIC}] \`${attributeName(first)}\` on ${hostLabel(tag, type)} ` +
 		`is a native commit event in Octane; it does not run for each text edit. Use \`${replacement}\` ` +
-		'for per-edit updates. If commit/blur behavior is intentional, add ' +
-		'`suppressNativeChangeWarning`.';
+		(strong
+			? 'for per-edit updates. Strong mode requires an explicit per-edit handler for editable text controls.'
+			: 'for per-edit updates. If commit/blur behavior is intentional, add `suppressNativeChangeWarning`.');
 	if (controlled) {
 		message +=
 			' This control also has `value`; edits are restored before the later native change. ' +
@@ -280,7 +281,7 @@ function diagnosticFor(source, filename, tag, type, changeAttributes, controlled
 	const primary = rangeFor(source, first.name ?? first);
 	return {
 		code: NATIVE_TEXT_ONCHANGE_DIAGNOSTIC,
-		severity: 'warning',
+		severity: strong ? 'error' : 'warning',
 		message,
 		filename: filename || 'module.tsrx',
 		start: primary.start,
@@ -295,7 +296,16 @@ function diagnosticFor(source, filename, tag, type, changeAttributes, controlled
 	};
 }
 
-function classifyHost(node, scope, namespace, source, filename, diagnostics, classifications) {
+function classifyHost(
+	node,
+	scope,
+	namespace,
+	source,
+	filename,
+	diagnostics,
+	classifications,
+	strong,
+) {
 	const tag = tagName(node);
 	if ((tag !== 'input' && tag !== 'textarea') || namespace !== 'html') return;
 	const attributes = attributesOf(node);
@@ -365,6 +375,7 @@ function classifyHost(node, scope, namespace, source, filename, diagnostics, cla
 			type ?? { kind: 'text', display: 'text' },
 			changeAttributes,
 			lastAttribute(attributes, 'value') !== null,
+			strong,
 		),
 	);
 }
@@ -484,7 +495,16 @@ export function analyzeNativeChangeDiagnostics(ast, source, filename, options = 
 		const isHost = typeof tag === 'string' && /^[a-z]/.test(tag);
 		const selfNs = isHost ? nsForSelf(tag, parentNs) : parentNs;
 		if (isHost && rendererIsDomAt(node)) {
-			classifyHost(node, scope, selfNs, source, filename, diagnostics, classifications);
+			classifyHost(
+				node,
+				scope,
+				selfNs,
+				source,
+				filename,
+				diagnostics,
+				classifications,
+				options.strong === true,
+			);
 		}
 
 		for (const attribute of attributesOf(node)) {

@@ -49,6 +49,28 @@ async function analyze(files, extra = []) {
 }
 
 describe('octane analyze', () => {
+	it('reports redundant Strong dependencies as hints without failing --strict', async () => {
+		const result = await analyze(
+			{
+				'src/Hint.tsrx': `"use strong";
+import { useEffect } from 'octane';
+import { observe } from './external';
+export function Hint({ value }) @{
+  useEffect(() => { observe(value); }, [value]);
+  <div />
+}`,
+			},
+			['--strict'],
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.json().summary).toEqual({ errors: 0, warnings: 0, hints: 1 });
+		expect(result.json().findings).toEqual([
+			expect.objectContaining({
+				code: 'OCTANE_STRONG_EXPLICIT_DEPENDENCIES',
+				severity: 'hint',
+			}),
+		]);
+	});
 	it('reports a compiler diagnostic with its code, position and suggestion', async () => {
 		const result = await analyze({
 			'src/Bad.tsrx':
