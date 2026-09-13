@@ -779,6 +779,12 @@ export function conventionalTestPath(relativePath, { runner } = {}) {
 	);
 }
 
+export function isUpstreamTypeTestPath(relativePath) {
+	return /(?:^|\/)(?:typetests|type-tests|test-d)(?:\/|$)|(?:^|[.-])(?:test-d|d-test)\.[cm]?[jt]sx?$|(?:^|[\/.-])types?\.test\.[cm]?tsx?$/i.test(
+		relativePath,
+	);
+}
+
 function expandBracePattern(pattern) {
 	const expanded = [pattern];
 	for (let index = 0; index < expanded.length; index++) {
@@ -1347,13 +1353,7 @@ export async function immutableTestInventory(tree, subdirectory, manifest, optio
 		});
 		inventory.push({
 			path: entry.path,
-			kind:
-				typeCases.length > 0 ||
-				/(?:^|\/)(?:typetests|type-tests|test-d)(?:\/|$)|(?:^|[.-])(?:test-d|d-test)\.[cm]?[jt]sx?$|(?:^|[.-])types?\.test\.[cm]?tsx?$/i.test(
-					relativePath,
-				)
-					? 'type'
-					: 'runtime',
+			kind: typeCases.length > 0 || isUpstreamTypeTestPath(relativePath) ? 'type' : 'runtime',
 			gitBlob: entry.sha,
 			size: entry.size ?? 0,
 			registrations,
