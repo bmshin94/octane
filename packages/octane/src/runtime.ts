@@ -4468,12 +4468,17 @@ function vtRectChanged(rec: VtRec): boolean {
 	return false;
 }
 
-function vtCreateRecord(block: Block, els: Element[], styles: Map<Element, VtSavedStyle>): VtRec {
-	const props = block.vt;
-	const name = vtGetName(block, props);
+function vtCreateRecord(
+	block: Block,
+	els: Element[],
+	styles: Map<Element, VtSavedStyle>,
+	props = block.vt,
+	owner = vtScopeForBlock(block),
+	name = vtGetName(block, props),
+): VtRec {
 	return {
 		block,
-		owner: vtScopeForBlock(block),
+		owner,
 		props,
 		els,
 		rects: vtMeasureElements(els),
@@ -6501,6 +6506,13 @@ function vtFlush(
 	const types = VT_PENDING_TYPES;
 	VT_PENDING_TYPES = [];
 	const groups = new Map<VTOwner, VtGroup>();
+	// A portal may first reveal its destination during preparation. Retain old
+	// metadata, but defer layout/CSS reads for owners outside the queued batch.
+	let unmeasured: Map<
+		VTOwner,
+		Array<{ block: Block; props: ViewTransitionProps | null; els: Element[]; name: string | null }>
+	> | null = null;
+	let discoveredOwners: Set<VTOwner> | null = null;
 	let hasScopedBoundary = false;
 	const getGroup = (owner: VTOwner): VtGroup => {
 		let group = groups.get(owner);
@@ -6540,7 +6552,24 @@ function vtFlush(
 		}
 		if (block.vt?.scope === 'element') hasScopedBoundary = true;
 		const owner = vtScopeForBlock(block);
-		if (owner === null || (queuedOwners !== null && !queuedOwners.has(owner))) continue;
+		if (owner === null) continue;
+		if (queuedOwners !== null && !queuedOwners.has(owner)) {
+			if (typeof owner.startViewTransition !== 'function') continue;
+			const els = vtCaptureElements(block, owner);
+			if (els.length === 0) continue;
+			const props = block.vt;
+			const name =
+				props?.name != null && props.name !== 'auto'
+					? props.name
+					: props?.scope === 'element'
+						? null
+						: vtGetName(block, props);
+			const before = (unmeasured ??= new Map()).get(owner);
+			const record = { block, props, els, name };
+			if (before === undefined) unmeasured.set(owner, [record]);
+			else before.push(record);
+			continue;
+		}
 		const group = getGroup(owner);
 		if (!group.valid) continue;
 		const els = vtCaptureElements(block, owner);
@@ -6593,6 +6622,23 @@ function vtFlush(
 				if (vtCaptureElements(block, owner).length > 0)
 					getGroup(owner).planned.set(block, block.vt);
 			}
+			if (unmeasured !== null)
+				for (const owner of groups.keys())
+					if (unmeasured.has(owner)) (discoveredOwners ??= new Set()).add(owner);
+			if (discoveredOwners !== null) {
+				// Existing destination boundaries survive even when they belong to
+				// another root and were not themselves rendered by this batch.
+				for (const block of VT_REGISTRY) {
+					if (block.disposed) continue;
+					const owner = vtScopeForBlock(block);
+					if (
+						owner !== null &&
+						discoveredOwners.has(owner) &&
+						vtCaptureElements(block, owner).length > 0
+					)
+						groups.get(owner)!.planned.set(block, block.vt);
+				}
+			}
 			for (const group of groups.values()) {
 				if (
 					group.owner.nodeType !== 9 &&
@@ -6609,6 +6655,28 @@ function vtFlush(
 			endStagedCommitCapture(stagedCommit);
 		}
 	}
+	if (discoveredOwners !== null) {
+		// Staging is detached now: measure the committed old hosts using saved
+		// ownership/props rather than the blocks' already-prepared next state.
+		for (const owner of discoveredOwners) {
+			const group = groups.get(owner)!;
+			if (!group.valid) continue;
+			for (const before of unmeasured!.get(owner)!) {
+				const rec = vtCreateRecord(
+					before.block,
+					before.els,
+					group.styles,
+					before.props,
+					owner,
+					before.name ?? vtScopeName(owner as HTMLElement),
+				);
+				group.visibleBefore.add(before.block);
+				group.recs.push(rec);
+				group.records.set(before.block, rec);
+			}
+		}
+	}
+	unmeasured = null;
 	// Keep the document API's no-boundary skip behavior. A declaration with
 	// no usable host must not turn into this document fallback.
 	if (groups.size === 0 && !hasScopedBoundary) getGroup(defaultOwner);

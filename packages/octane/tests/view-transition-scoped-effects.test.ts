@@ -30,6 +30,7 @@ function deferred() {
 
 interface Capture {
 	owner: Element | Document;
+	oldNames: string[];
 	update: () => void | Promise<void>;
 	ready: ReturnType<typeof deferred>;
 	finished: ReturnType<typeof deferred>;
@@ -58,6 +59,12 @@ describe('element-scoped ViewTransition commit lifetimes', () => {
 			const finished = deferred();
 			const capture: Capture = {
 				owner: this,
+				oldNames:
+					this instanceof Element
+						? [this, ...this.querySelectorAll('*')]
+								.map((el) => (el as HTMLElement).style.getPropertyValue('view-transition-name'))
+								.filter(Boolean)
+						: [],
 				update: input.update,
 				ready,
 				finished,
@@ -355,43 +362,56 @@ describe('element-scoped ViewTransition commit lifetimes', () => {
 		expect(refs.at(-1)).toBe(newInstance);
 		expect(rightOwner.textContent).toBe('later');
 	});
-	it('captures both physical owners when a separate source root moves a portal between scopes', async () => {
-		const source = document.createElement('div');
-		document.body.append(source);
-		const portalRoot = createRoot(source);
-		try {
-			await act(() =>
-				portalRoot.render(ForeignScopedPortalApp, { portal: owner('left'), value: 'before' }),
-			);
-			startTransition(() =>
-				portalRoot.render(ForeignScopedPortalApp, { portal: owner('right'), value: 'after' }),
-			);
-			const left = await nextCapture('left');
-			const right = await nextCapture('right');
-			await Promise.all([left.update(), right.update()]);
-			left.ready.resolve();
-			right.ready.resolve();
-			expect(owner('left').textContent).not.toContain('before');
-			expect(owner('right').textContent).toContain('after');
-			expect(captures.some((capture) => capture.owner === document)).toBe(false);
-		} finally {
-			flushSync(() => portalRoot.unmount());
-			source.remove();
-		}
-	});
+	it.each([false, true])(
+		'preserves existing destination boundaries when a separate root inserts a portal (moving=%s)',
+		async (moving) => {
+			const source = document.createElement('div');
+			document.body.append(source);
+			const portalRoot = createRoot(source);
+			const scopeEvents: string[] = [];
+			try {
+				await act(() => root.render(ScopedEffectsApp, { controls, events, scopeEvents }));
+				await act(() =>
+					portalRoot.render(ForeignScopedPortalApp, {
+						portal: moving ? owner('left') : null,
+						value: 'before',
+					}),
+				);
+				startTransition(() =>
+					portalRoot.render(ForeignScopedPortalApp, { portal: owner('right'), value: 'after' }),
+				);
+				const right = await nextCapture('right');
+				const left = moving ? await nextCapture('left') : undefined;
+				expect.soft(right.oldNames).toEqual(['right-scope', 'item']);
+				await Promise.all([left?.update(), right.update()]);
+				left?.ready.resolve();
+				right.ready.resolve();
+				await vi.waitFor(() => expect(scopeEvents).toEqual(['update:right']));
+				expect(owner('left').textContent).not.toContain('before');
+				expect(owner('right').textContent).toContain('after');
+				expect(captures.some((capture) => capture.owner === document)).toBe(false);
+			} finally {
+				flushSync(() => portalRoot.unmount());
+				source.remove();
+			}
+		},
+	);
 	it.each([false, true])(
 		'waits for a newly discovered busy portal destination and permits urgent interruption (urgent=%s)',
 		async (urgent) => {
 			const source = document.createElement('div');
 			document.body.append(source);
 			const portalRoot = createRoot(source);
+			const scopeEvents: string[] = [];
 			try {
+				await act(() => root.render(ScopedEffectsApp, { controls, events, scopeEvents }));
 				await act(() =>
 					portalRoot.render(ForeignScopedPortalApp, { portal: owner('left'), value: 'before' }),
 				);
 				startTransition(() => controls.right('busy'));
 				const busy = await nextCapture('right');
 				await updateAndReady(busy);
+				scopeEvents.length = 0;
 				const previous = captures.length;
 				let prepared = false;
 				startTransition(() =>
@@ -420,9 +440,11 @@ describe('element-scoped ViewTransition commit lifetimes', () => {
 					busy.finished.resolve();
 					const left = await nextCapture('left', previous);
 					const right = await nextCapture('right', previous);
+					expect.soft(right.oldNames).toEqual(['right-scope', 'item']);
 					await Promise.all([left.update(), right.update()]);
 					left.ready.resolve();
 					right.ready.resolve();
+					await vi.waitFor(() => expect(scopeEvents).toEqual(['update:right']));
 					expect(owner('left').textContent).not.toContain('before');
 					expect(owner('right').textContent).toContain('after');
 				}

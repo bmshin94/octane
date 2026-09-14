@@ -12,6 +12,7 @@ interface Props {
 	controls: Record<string, (value: string) => void>;
 	events: string[];
 	promise?: Promise<string>;
+	scopeEvents?: string[];
 }
 
 function Content(props: Props & { id: string }) @{
@@ -37,7 +38,16 @@ export function ScopedEffectsApp(props: Props) @{
 				</ViewTransition>
 			</section>
 		</ViewTransition>
-		<ViewTransition scope="element" name="right-scope">
+		<ViewTransition
+			scope="element"
+			name="right-scope"
+			onEnter={() => {
+				props.scopeEvents?.push('enter:right');
+			}}
+			onUpdate={() => {
+				props.scopeEvents?.push('update:right');
+			}}
+		>
 			<section data-scope="right">
 				@if (props.promise !== undefined) {
 					@try {
@@ -48,7 +58,12 @@ export function ScopedEffectsApp(props: Props) @{
 						<span data-value="right">{'waiting'}</span>
 					}
 				} @else {
-					<ViewTransition name="item">
+					<ViewTransition
+						name="item"
+						onParentEnter={() => {
+							props.scopeEvents?.push('parent-enter:right-item');
+						}}
+					>
 						<Content {...props} id="right" />
 					</ViewTransition>
 				}
@@ -159,11 +174,12 @@ export function ScopedPortalMoveApp(props: {
 }
 
 export function ForeignScopedPortalApp(props: {
-	portal: Element;
+	portal: Element | null;
 	value: string;
 	onRender?: () => void;
 }) {
 	props.onRender?.();
+	if (props.portal === null) return null;
 	return createPortal(
 		<ViewTransition name="foreign-moving">
 			<span>{props.value as string}</span>
