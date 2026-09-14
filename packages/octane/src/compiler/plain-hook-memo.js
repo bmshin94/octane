@@ -233,7 +233,11 @@ function slotBaseHooks(ast, state, options) {
 		const mapped = mapChildren(node, visit);
 		const args = mapped.arguments.slice();
 		if (inferred !== undefined) {
-			args.splice(inferred.depsIndex, 0, inferredDependencyArray(inferred, state, node));
+			args.splice(
+				inferred.depsIndex,
+				inferred.replaceDependency ? 1 : 0,
+				inferredDependencyArray(inferred, state, node),
+			);
 		}
 		let callee = mapped.callee;
 		if (options.getterCalls.has(node) && options.stateGetterHelpers[imported]) {

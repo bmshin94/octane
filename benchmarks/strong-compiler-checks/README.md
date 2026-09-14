@@ -61,13 +61,16 @@ the two separate medians.
 
 ## PR measurements
 
-Measured on 14 September 2026 (Europe/London), with v26.4.0 Node,
-14.6.202.34-node.21 V8, Apple M5 Max, and Darwin 25.6.0
-arm64. Broad tests and typechecks were idle during this run.
+Rerun after the hook-dependency review fixes on 14 September 2026
+(Europe/London), with Node v26.4.0, V8 14.6.202.34-node.21,
+Apple M5 Max, and Darwin 25.6.0 arm64.
+Broad tests and typechecks were idle during this run.
 
 - Immutable baseline: `8e5ca22a6e17582b4293232406a2c0420509f4a4`.
-- Candidate: the uncommitted PR source on that baseline; aggregate source SHA-256
-  `d20ed7ab66f54de8e442937a3f4db8aaaa1fe218b4e792bd2bd226efd1074bc6`.
+- Candidate: the PR working tree based on
+  `6699e4c866076a04f4f6c3dfccced8e7cf2db55a`, including the review fixes;
+  aggregate source SHA-256
+  `7228a2d19dab42cf828053ff7649f57a90a4b756bd774b034e754400b78d0548`.
 - All source and dependency hashes stayed stable throughout the measurement.
 - [Raw samples, command, environment, and per-file hashes](./results-2026-09-14.json).
 
@@ -75,30 +78,31 @@ arm64. Broad tests and typechecks were idle during this run.
 
 | Workload | Components | Baseline median ms | Candidate median ms | Baseline p95 ms | Candidate p95 ms | Paired median ratio |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| normal | 100 | 41.64 | 46.79 | 55.50 | 62.69 | 1.116 |
-| normal | 1,000 | 448.73 | 486.50 | 520.53 | 538.74 | 1.106 |
-| ambient | 100 | 38.49 | 48.24 | 54.50 | 76.36 | 1.210 |
-| ambient | 1,000 | 437.26 | 509.92 | 480.74 | 589.89 | 1.197 |
-| alias-heavy | 100 | 38.17 | 44.41 | 62.39 | 69.75 | 1.184 |
-| alias-heavy | 1,000 | 450.56 | 516.75 | 478.11 | 593.51 | 1.156 |
+| normal | 100 | 41.21 | 47.00 | 57.64 | 59.33 | 1.132 |
+| normal | 1,000 | 403.61 | 461.78 | 438.48 | 543.61 | 1.123 |
+| ambient | 100 | 35.95 | 40.60 | 50.54 | 58.93 | 1.160 |
+| ambient | 1,000 | 393.00 | 450.55 | 483.47 | 484.95 | 1.177 |
+| alias-heavy | 100 | 38.21 | 43.64 | 53.04 | 65.39 | 1.156 |
+| alias-heavy | 1,000 | 413.60 | 477.31 | 443.71 | 495.85 | 1.159 |
 
 ### Compatibility controls
 
 | Workload | Components | Baseline median ms | Candidate median ms | Baseline p95 ms | Candidate p95 ms | Paired median ratio |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| normal | 100 | 39.12 | 38.03 | 54.14 | 52.23 | 1.002 |
-| normal | 1,000 | 420.70 | 429.67 | 511.25 | 534.99 | 0.971 |
-| ambient | 100 | 37.93 | 38.43 | 61.42 | 57.50 | 1.046 |
-| ambient | 1,000 | 409.59 | 398.09 | 447.52 | 418.29 | 0.964 |
-| alias-heavy | 100 | 37.83 | 37.88 | 56.71 | 54.97 | 1.008 |
-| alias-heavy | 1,000 | 451.62 | 456.40 | 501.55 | 549.61 | 1.031 |
+| normal | 100 | 36.67 | 37.22 | 53.62 | 52.30 | 1.016 |
+| normal | 1,000 | 391.09 | 402.42 | 410.99 | 436.33 | 1.073 |
+| ambient | 100 | 35.23 | 33.86 | 54.83 | 51.06 | 0.977 |
+| ambient | 1,000 | 369.95 | 368.62 | 383.04 | 383.44 | 1.021 |
+| alias-heavy | 100 | 35.57 | 37.04 | 53.53 | 53.71 | 1.009 |
+| alias-heavy | 1,000 | 416.65 | 416.22 | 463.45 | 441.53 | 0.970 |
 
-Strong paired median ratios range from **1.106 to 1.210** (about **11–21%**
-additional compilation time). Compatibility controls range from **0.964 to
-1.046**. The controls support attributing additional work to Strong compilation,
-while the broad individual-sample variation limits precision. These numbers are
-compiler costs on the stated synthetic workloads, not runtime speed changes or
-a general application build-time budget.
+Strong paired median ratios range from **1.123 to 1.177**
+(**12.3–17.7%** additional
+compilation time). Compatibility controls range from **0.970 to
+1.073**. The controls support attributing additional work to Strong
+compilation, while individual-sample variation and the compatibility spread
+limit precision. These numbers are compiler costs on the stated synthetic
+workloads, not runtime speed changes or a general application build-time budget.
 
 All **24 client/server output comparisons** matched byte for byte and by SHA-256.
 Across the six fixture sizes, client output spans 80,742–908,043 bytes and server

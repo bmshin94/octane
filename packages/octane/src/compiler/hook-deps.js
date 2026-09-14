@@ -221,6 +221,15 @@ function unwrapValue(node) {
 	return node;
 }
 
+function isUnshadowedUndefined(node, scope) {
+	const value = unwrapValue(node);
+	return (
+		value?.type === 'Identifier' &&
+		value.name === 'undefined' &&
+		resolveBinding(scope, value.name) === null
+	);
+}
+
 function canonicalHookName(call, scope, onlyImported) {
 	const callee = unwrapValue(call?.callee);
 	if (!callee) return null;
@@ -643,7 +652,11 @@ function buildScopes(ast, onlyImported, hookRuntimeModules, bindingsOnly = false
 				config,
 				trustedConfig,
 			});
-			if (trustedConfig && node.arguments.length === trustedConfig.deps) {
+			if (
+				trustedConfig &&
+				(node.arguments.length === trustedConfig.deps ||
+					node._octaneStrongOmittedDependency === true)
+			) {
 				candidates.push({ call: node, scope, name: trustedName, config: trustedConfig });
 			}
 		}
@@ -1519,6 +1532,9 @@ function analyzeInternal(ast, options) {
 		inferred.set(candidate.call, {
 			name: candidate.name,
 			depsIndex: candidate.config.deps,
+			...(candidate.call._octaneStrongOmittedDependency === true
+				? { replaceDependency: true }
+				: {}),
 			dependencies,
 		});
 	}
@@ -1696,7 +1712,7 @@ export function analyzeStrongHookPolicies(ast, options = {}) {
 			continue;
 		}
 		const argument = call.arguments[config.deps];
-		if (argument === undefined) continue;
+		if (argument === undefined || isUnshadowedUndefined(argument, scope)) continue;
 		const authored = unwrapValue(argument);
 		if (
 			(authored?.type === 'Literal' && authored.value === null) ||
@@ -1785,14 +1801,14 @@ function rebuildWithHookMetadata(ast, analysis, inferred, insertDeps, nativeRead
 			if (out === null) out = { ...node };
 			if (props !== undefined) Object.assign(out, props);
 			if (result !== undefined) {
-				// Only an authored omission grants this capability. Explicit arrays,
-				// null, and dependency arguments forwarded by wrappers stay ordinary.
+				// Only an omission (including Strong’s proven undefined placeholder) grants
+				// this capability. Arrays, null, and forwarded dependencies stay ordinary.
 				if (nativeReads && result.name === 'useMemo') out._octaneNativeInferredMemo = true;
 				if (insertDeps) {
 					const args = out.arguments.slice();
 					// The synthesized array maps to the hook call it belongs to; each
 					// dependency clone keeps its authored position.
-					args.splice(result.depsIndex, 0, {
+					args.splice(result.depsIndex, result.replaceDependency ? 1 : 0, {
 						...b.array(
 							result.dependencies.map((/** @type {any} */ dependency) =>
 								dependency.method ? methodDepNode(dependency) : cloneDependency(dependency.node),
@@ -1871,9 +1887,13 @@ export function analyzeStrongMemoCandidates(ast, options = {}, existingAnalysis 
 	const hookName = strongHookNameResolver(analysis, false);
 	const importedHookName = strongHookNameResolver(analysis, true);
 	const hookCalls = new Map();
+	const omittedDependencies = new Set();
 	for (const { call, scope, trustedConfig } of analysis.calls) {
 		const name = importedHookName(call, scope);
-		if (DEPENDENCY_HOOKS.has(name) && (!trustedConfig || call.optional)) hookCalls.set(call, name);
+		const config = DEPENDENCY_HOOKS.get(name);
+		if (!config) continue;
+		if (!trustedConfig || call.optional) hookCalls.set(call, name);
+		if (isUnshadowedUndefined(call.arguments[config.deps], scope)) omittedDependencies.add(call);
 	}
 	const owners = new Map(analysis.functions.map((record) => [record.scope, record]));
 	const functions = new Map(
@@ -2024,19 +2044,24 @@ export function analyzeStrongMemoCandidates(ast, options = {}, existingAnalysis 
 			markMutation(node.left);
 		if (node.type === 'CallExpression') {
 			const member = unwrapValue(node.callee);
-			const method = member?.computed ? member.property?.value : member?.property?.name;
+			const property = unwrapValue(member?.property);
+			const receiver = unwrapValue(member?.object);
+			const method = member?.computed
+				? property?.type === 'Literal'
+					? property.value
+					: null
+				: property?.name;
+			// Preserve the conservative treatment of same-named local objects:
+			// a shadowed Object/Reflect implementation can also mutate its target.
 			if (
-				member?.object?.type === 'Identifier' &&
-				((member.object.name === 'Object' &&
+				receiver?.type === 'Identifier' &&
+				((receiver.name === 'Object' &&
 					['assign', 'defineProperty', 'defineProperties', 'setPrototypeOf'].includes(method)) ||
-					(member.object.name === 'Reflect' &&
+					(receiver.name === 'Reflect' &&
 						['set', 'deleteProperty', 'defineProperty', 'setPrototypeOf'].includes(method)))
 			)
 				markMutation(node.arguments[0]);
-			if (
-				member?.type === 'MemberExpression' &&
-				mutationMethods.has(member.computed ? member.property?.value : member.property?.name)
-			) {
+			if (member?.type === 'MemberExpression' && mutationMethods.has(method)) {
 				const binding = rootBinding(member.object);
 				if (binding) mutated.add(binding);
 			}
@@ -2213,5 +2238,5 @@ export function analyzeStrongMemoCandidates(ast, options = {}, existingAnalysis 
 			continue;
 		candidates.set(decl, callback ? 'useCallback' : 'useMemo');
 	}
-	return { candidates, names, hookCalls };
+	return { candidates, names, hookCalls, omittedDependencies };
 }

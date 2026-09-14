@@ -44,8 +44,11 @@ export function unsupportedStrongAutomaticMemo(node, filename, message) {
  * The caller invokes this only after validating authored Strong source.
  */
 export function applyStrongAutomaticMemo(ast, options = {}) {
-	const { candidates, names, hookCalls } = analyzeStrongMemoCandidates(ast, options);
-	if (candidates.size === 0 && hookCalls.size === 0) return ast;
+	const { candidates, names, hookCalls, omittedDependencies } = analyzeStrongMemoCandidates(
+		ast,
+		options,
+	);
+	if (candidates.size === 0 && hookCalls.size === 0 && omittedDependencies.size === 0) return ast;
 	if (candidates.size > 0 && hasInlineMemoDirectEval(ast))
 		throw unsupportedStrongAutomaticMemo(
 			candidates.keys().next().value.init,
@@ -66,14 +69,18 @@ export function applyStrongAutomaticMemo(ast, options = {}) {
 			return children.some((child, index) => child !== node[index]) ? children : node;
 		}
 		const importedHook = hookCalls.get(node);
-		if (importedHook) {
+		const omittedDependency = omittedDependencies.has(node);
+		if (importedHook || omittedDependency) {
 			// Built-in exports are immutable and defined: normalize proven aliases
 			// and optional calls so existing dependency/slot passes see their ABI.
 			return {
 				...node,
-				callee: b.id(aliases.get(importedHook), node.callee),
+				callee: importedHook ? b.id(aliases.get(importedHook), node.callee) : rebuild(node.callee),
 				optional: false,
 				arguments: rebuild(node.arguments),
+				// Replace the proven placeholder during inference, keeping later slot
+				// arguments at their authored positions. Never rewrite an array.
+				...(omittedDependency ? { _octaneStrongOmittedDependency: true } : {}),
 			};
 		}
 		const hook = candidates.get(node);
@@ -94,6 +101,7 @@ export function applyStrongAutomaticMemo(ast, options = {}) {
 		return output;
 	}
 	const result = rebuild(ast);
+	if (aliases.size === 0) return result;
 	const imports = origin(
 		b.imports(
 			[...aliases].map(([hook, alias]) => [hook, alias]),

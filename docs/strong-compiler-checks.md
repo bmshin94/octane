@@ -19,7 +19,9 @@ support explicit dependencies, manual memo hooks, and ordinary raw HTML props.
 Dependency comparison uses the same lexical analysis as inference, including
 stable hook values and Effect Event exclusions. When dependency values are also
 observable callback arguments, their order and duplicates matter. A dynamic
-array is not an equivalent-list proof. `octane analyze` reports equivalent-list
+array is not an equivalent-list proof. An unshadowed `undefined` dependency
+argument counts as omission in Strong mode and receives inferred tracking.
+`octane analyze` reports equivalent-list
 hints without failing `--strict`.
 
 Strong compilation also caches eligible `const` objects, arrays, callbacks, and

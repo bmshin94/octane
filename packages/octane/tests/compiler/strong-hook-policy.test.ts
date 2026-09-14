@@ -20,7 +20,6 @@ describe('Strong compiler-owned hook policies', () => {
 		['coarser member paths', 'useEffect(() => console.log(props.value), [props]);'],
 		['opaque arrays', 'useEffect(() => console.log(props.value), props.dependencies);'],
 		['spread dependencies', 'useEffect(() => console.log(props.value), [...props.dependencies]);'],
-		['undefined opt-out', 'useEffect(() => console.log(props.value), undefined);'],
 		['layout effects', 'useLayoutEffect(() => console.log(props.value), []);'],
 		['insertion effects', 'useInsertionEffect(() => console.log(props.value), []);'],
 		['imperative handles', 'useImperativeHandle(props.ref, () => ({ value: props.value }), []);'],
@@ -114,6 +113,40 @@ describe('Strong compiler-owned hook policies', () => {
 			`import * as Octane from 'octane'; export function App({ Octane, useMemo }) @{ const { useEffect: effect } = Octane; effect?.(() => 1, []); Octane?.useMemo(() => 1); useMemo?.(() => 1); <div /> }`,
 		])
 			expect(() => compile(strong(source), '/src/App.tsrx')).not.toThrow();
+	});
+
+	it.each([
+		'undefined',
+		'(undefined)',
+		'(undefined as undefined)',
+		'(undefined satisfies undefined)',
+		'undefined!',
+	])('treats unshadowed %s as the optional dependency form', (dependencies) => {
+		for (const [imports, callee] of [
+			["import { useEffect } from 'octane';", 'useEffect'],
+			["import { useEffect as effect } from 'octane';", 'effect'],
+			["import * as Octane from 'octane';", 'Octane.useEffect'],
+		]) {
+			const source = strong(
+				`${imports} export function useLog(props) { ${callee}(() => console.log(props.value), ${dependencies}); }`,
+			);
+			for (const options of [{}, { dev: true }, { mode: 'server' }])
+				expect(() => compile(source, '/src/useLog.tsx', options as any)).not.toThrow();
+			expect(() => slotHooks(source, '/src/useLog.ts')).not.toThrow();
+			expect(compileToVolarMappings(source, '/src/useLog.tsx').diagnostics).toEqual([]);
+		}
+	});
+
+	it.each([
+		'export function useLog(props, undefined) { useEffect(() => console.log(props.value), undefined); }',
+		'const undefined = []; export function useLog(props) { useEffect(() => console.log(props.value), (undefined as any)); }',
+	])('retains explicit policy for a shadowed undefined binding', (declaration) => {
+		const source = strong(`import { useEffect } from 'octane'; ${declaration}`);
+		expect(() => compile(source, '/src/useLog.tsx')).toThrow(EXPLICIT);
+		expect(() => slotHooks(source, '/src/useLog.ts')).toThrow(EXPLICIT);
+		expect(compileToVolarMappings(source, '/src/useLog.tsx').diagnostics).toEqual(
+			expect.arrayContaining([expect.objectContaining({ code: EXPLICIT })]),
+		);
 	});
 
 	it('retains Effect Event dependency errors', () => {

@@ -48,6 +48,54 @@ describe('Strong declarations used as reactive hook inputs', () => {
 		}
 	});
 
+	it.each(['undefined', '(undefined as undefined)'])(
+		'infers optional %s dependencies and preserves an explicit later slot',
+		(dependencies) => {
+			for (const strong of [false, true])
+				for (const plain of [false, true])
+					for (const dev of [false, true])
+						for (const laterSlot of ['', ', slot']) {
+							const seen: string[] = [];
+							const setup = `${strong ? '"use strong";' : ''} import { useEffect } from 'octane'; import { observe } from './probe'; const slot = Symbol(); export function useRead(props) { useEffect(() => observe(props.label), ${dependencies}${laterSlot}); }`;
+							const runtimeModules = {
+								'./probe': { observe: (label: string) => seen.push(label) },
+							};
+							const hooks = plain
+								? loadPlainHookFixtureSource(setup, {
+										id: '/src/OptionalDeps.ts',
+										inlineHookMemo: false,
+										hmr: dev,
+										runtimeModules,
+									})
+								: null;
+							const { App } = loadCompiledFixtureSource(
+								plain
+									? `import { useRead } from './hook'; export function App(props) @{ useRead(props); <span>{props.noise as string}</span> }`
+									: `${setup} export function App(props) @{ useRead(props); <span>{props.noise as string}</span> }`,
+								{
+									id: '/src/OptionalDeps.tsrx',
+									mode: 'client',
+									compileOptions: { dev, hmr: false },
+									runtimeModules: { ...runtimeModules, ...(hooks ? { './hook': hooks } : {}) },
+								},
+							);
+							const mounted = mount(App, { label: 'first', noise: 'one' });
+							try {
+								flushEffects();
+								expect(seen).toEqual(['first']);
+								mounted.update(App, { label: 'first', noise: 'two' });
+								flushEffects();
+								expect(seen).toEqual(strong ? ['first'] : ['first', 'first']);
+								mounted.update(App, { label: 'second', noise: 'two' });
+								flushEffects();
+								expect(seen).toEqual(strong ? ['first', 'second'] : ['first', 'first', 'second']);
+							} finally {
+								mounted.unmount();
+							}
+						}
+		},
+	);
+
 	it.each([false, true])(
 		'retains live native reads after automatic cache hits in dev=%s',
 		(dev) => {
@@ -189,7 +237,7 @@ export function useData(label: string) {
   const options = { label };
   const a = use(request('a', label));
   const b = use(request('b', label));
-  useEffect(() => { observe('start', options); return () => observe('stop', options); });
+  useEffect(() => { observe('start', options); return () => observe('stop', options); }, (undefined as undefined));
   return { a, b };
 }`,
 				{
@@ -288,18 +336,42 @@ export function App(props) @{ const value = { count: 0 }; const alias = value; a
 			'const outer = { count: 0 }; Object.assign(outer, { count: outer.count + 1 });',
 			'outer.count',
 		],
+		[
+			'typed Object.assign',
+			'const outer = { count: 0 }; (Object as any).assign(outer, { count: outer.count + 1 });',
+			'outer.count',
+		],
+		[
+			'parenthesized Object.assign',
+			'const outer = { count: 0 }; (Object).assign(outer, { count: outer.count + 1 });',
+			'outer.count',
+		],
+		[
+			'typed Reflect.set',
+			"const outer = { count: 0 }; (Reflect as any).set(outer, 'count', outer.count + 1);",
+			'outer.count',
+		],
+		['typed computed mutator', "const outer = []; outer[('push' as string)](1);", 'outer.length'],
+		['parenthesized computed mutator', "const outer = []; outer[('push')](1);", 'outer.length'],
+		[
+			'shadowed typed Object mutator',
+			'const Object = { assign(target, source) { target.count = source.count; } }; const outer = { count: 0 }; (Object as any).assign(outer, { count: outer.count + 1 });',
+			'outer.count',
+		],
 	])('preserves fresh nested objects through %s', (_label, setup, read) => {
-		const { App } = loadCompiledFixtureSource(
-			`"use strong"; export function App(props) @{ ${setup} <span>{props.label + ':' + ${read} as string}</span> }`,
-			{ id: '/src/NestedMutation.tsrx', mode: 'client' },
-		);
-		const mounted = mount(App, { label: 'first' });
-		try {
-			expect(mounted.container.textContent).toBe('first:1');
-			mounted.update(App, { label: 'second' });
-			expect(mounted.container.textContent).toBe('second:1');
-		} finally {
-			mounted.unmount();
+		for (const dev of [false, true]) {
+			const { App } = loadCompiledFixtureSource(
+				`"use strong"; export function App(props) @{ ${setup} <span>{props.label + ':' + ${read} as string}</span> }`,
+				{ id: '/src/NestedMutation.tsrx', mode: 'client', compileOptions: { dev, hmr: false } },
+			);
+			const mounted = mount(App, { label: 'first' });
+			try {
+				expect(mounted.container.textContent).toBe('first:1');
+				mounted.update(App, { label: 'second' });
+				expect(mounted.container.textContent).toBe('second:1');
+			} finally {
+				mounted.unmount();
+			}
 		}
 	});
 
