@@ -7,7 +7,7 @@ claim about latency, paint cost, garbage collection, or V8 allocations.
 
 ```sh
 node benchmarks/bench.mjs --quick --ratios view-transitions
-BENCH_JSON=/tmp/vt-baseline.json node benchmarks/view-transitions/bundle.mjs --octane-revision=e98b29e3dd848b44d5fbdfe0f8dad111f8836b27
+BENCH_JSON=/tmp/vt-baseline.json node benchmarks/view-transitions/bundle.mjs --octane-revision=277c10c3fa80f56ef162959832dba35c1b43b32e
 BENCH_JSON=/tmp/vt-candidate.json node benchmarks/view-transitions/bundle.mjs
 ```
 
