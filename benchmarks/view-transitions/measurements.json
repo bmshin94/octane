@@ -1,0 +1,1611 @@
+{
+  "date": "2026-09-14",
+  "baselineRevision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+  "candidateRevision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+  "bundles": {
+    "baseline": {
+      "suite": "view-transitions",
+      "targets": [
+        {
+          "name": "vt-bundle-root-static",
+          "ops": {
+            "raw": {
+              "score": 164612,
+              "median": 164612,
+              "min": 164612,
+              "samples": 1
+            },
+            "gzip": {
+              "score": 52777,
+              "median": 52777,
+              "min": 52777,
+              "samples": 1
+            },
+            "driver_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "staging_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+            "sourceSha256": "3a546f6cb3dd85604e2f401ab916c51c0f7d44a816789a0346e076579f954f4a",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "snapshot": {
+              "text": "Octane",
+              "cleaned": true
+            },
+            "bundleSha256": "5d25af1f28e859c2a86f3c78156ebe24d1bb0615de95a1c2d6f72268d4170f0b"
+          }
+        },
+        {
+          "name": "vt-bundle-hooks-state",
+          "ops": {
+            "raw": {
+              "score": 172768,
+              "median": 172768,
+              "min": 172768,
+              "samples": 1
+            },
+            "gzip": {
+              "score": 55662,
+              "median": 55662,
+              "min": 55662,
+              "samples": 1
+            },
+            "driver_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "staging_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+            "sourceSha256": "3a546f6cb3dd85604e2f401ab916c51c0f7d44a816789a0346e076579f954f4a",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "snapshot": {
+              "before": "0",
+              "after": "1",
+              "clicks": 1,
+              "effects": 1,
+              "cleanups": 1,
+              "cleaned": true
+            },
+            "bundleSha256": "63a533d303074cf925157fb904d589a1a35b071971dd93d9e7448107fd36c02e"
+          }
+        },
+        {
+          "name": "vt-work-root-static",
+          "ops": {
+            "rect_reads": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "computed_style_reads": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "native_transitions": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+            "sourceSha256": "3a546f6cb3dd85604e2f401ab916c51c0f7d44a816789a0346e076579f954f4a",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "browser": "149.0.7827.55",
+            "snapshot": {
+              "text": "Octane",
+              "cleaned": true
+            }
+          }
+        },
+        {
+          "name": "vt-work-hooks-state",
+          "ops": {
+            "rect_reads": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "computed_style_reads": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "native_transitions": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+            "sourceSha256": "3a546f6cb3dd85604e2f401ab916c51c0f7d44a816789a0346e076579f954f4a",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "browser": "149.0.7827.55",
+            "snapshot": {
+              "before": "0",
+              "after": "1",
+              "clicks": 1,
+              "effects": 1,
+              "cleanups": 1,
+              "cleaned": true
+            }
+          }
+        },
+        {
+          "name": "vt-bundle-active",
+          "ops": {
+            "raw": {
+              "score": 261689,
+              "median": 261689,
+              "min": 261689,
+              "samples": 1
+            },
+            "gzip": {
+              "score": 74311,
+              "median": 74311,
+              "min": 74311,
+              "samples": 1
+            },
+            "driver_reachable": {
+              "score": 1,
+              "median": 1,
+              "min": 1,
+              "samples": 1
+            },
+            "staging_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+            "sourceSha256": "3a546f6cb3dd85604e2f401ab916c51c0f7d44a816789a0346e076579f954f4a",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "browser": "149.0.7827.55",
+            "snapshot": [
+              {
+                "text": "generation 1",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 2",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 3",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 4",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              }
+            ],
+            "bundleSha256": "3fe6fdb7d3721d670726000b16653df735eab3a3127745cd5c73b33c3d626179"
+          }
+        },
+        {
+          "name": "vt-work-four-updates",
+          "ops": {
+            "rect_reads": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "computed_style_reads": {
+              "score": 8,
+              "median": 8,
+              "min": 8,
+              "samples": 1
+            },
+            "native_transitions": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+            "sourceSha256": "3a546f6cb3dd85604e2f401ab916c51c0f7d44a816789a0346e076579f954f4a",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "browser": "149.0.7827.55",
+            "snapshot": [
+              {
+                "text": "generation 1",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 2",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 3",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 4",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              }
+            ]
+          }
+        },
+        {
+          "name": "vt-work-model",
+          "ops": {
+            "updates": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "rect_reads": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "computed_style_reads": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "native_transitions": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "driver_reachable": {
+              "score": 1,
+              "median": 1,
+              "min": 1,
+              "samples": 1
+            },
+            "staging_reachable": {
+              "score": 1,
+              "median": 1,
+              "min": 1,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+            "sourceSha256": "3a546f6cb3dd85604e2f401ab916c51c0f7d44a816789a0346e076579f954f4a",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "semanticControl": "four completed native animations preserve the input and final text"
+          }
+        }
+      ]
+    },
+    "candidate": {
+      "suite": "view-transitions",
+      "targets": [
+        {
+          "name": "vt-bundle-root-static",
+          "ops": {
+            "raw": {
+              "score": 168036,
+              "median": 168036,
+              "min": 168036,
+              "samples": 1
+            },
+            "gzip": {
+              "score": 53726,
+              "median": 53726,
+              "min": 53726,
+              "samples": 1
+            },
+            "driver_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "staging_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+            "sourceSha256": "f6217402759f493da3638a08e0438819719a76a0cf691d4e8a5d5d4d89f8e2ef",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "snapshot": {
+              "text": "Octane",
+              "cleaned": true
+            },
+            "bundleSha256": "6f6ca1b05beecd921f59eca6d06b9547f30ddab27d1bf7dab575881a9ac644ab"
+          }
+        },
+        {
+          "name": "vt-bundle-hooks-state",
+          "ops": {
+            "raw": {
+              "score": 176238,
+              "median": 176238,
+              "min": 176238,
+              "samples": 1
+            },
+            "gzip": {
+              "score": 56658,
+              "median": 56658,
+              "min": 56658,
+              "samples": 1
+            },
+            "driver_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "staging_reachable": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+            "sourceSha256": "f6217402759f493da3638a08e0438819719a76a0cf691d4e8a5d5d4d89f8e2ef",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "snapshot": {
+              "before": "0",
+              "after": "1",
+              "clicks": 1,
+              "effects": 1,
+              "cleanups": 1,
+              "cleaned": true
+            },
+            "bundleSha256": "5eb0d0f84bb89b8d731739a26cc3ccee18c310cf16e20c5d7c29cb9b120aa868"
+          }
+        },
+        {
+          "name": "vt-work-root-static",
+          "ops": {
+            "rect_reads": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "computed_style_reads": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "native_transitions": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+            "sourceSha256": "f6217402759f493da3638a08e0438819719a76a0cf691d4e8a5d5d4d89f8e2ef",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "browser": "149.0.7827.55",
+            "snapshot": {
+              "text": "Octane",
+              "cleaned": true
+            }
+          }
+        },
+        {
+          "name": "vt-work-hooks-state",
+          "ops": {
+            "rect_reads": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "computed_style_reads": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            },
+            "native_transitions": {
+              "score": 0,
+              "median": 0,
+              "min": 0,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+            "sourceSha256": "f6217402759f493da3638a08e0438819719a76a0cf691d4e8a5d5d4d89f8e2ef",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "browser": "149.0.7827.55",
+            "snapshot": {
+              "before": "0",
+              "after": "1",
+              "clicks": 1,
+              "effects": 1,
+              "cleanups": 1,
+              "cleaned": true
+            }
+          }
+        },
+        {
+          "name": "vt-bundle-active",
+          "ops": {
+            "raw": {
+              "score": 309326,
+              "median": 309326,
+              "min": 309326,
+              "samples": 1
+            },
+            "gzip": {
+              "score": 86143,
+              "median": 86143,
+              "min": 86143,
+              "samples": 1
+            },
+            "driver_reachable": {
+              "score": 1,
+              "median": 1,
+              "min": 1,
+              "samples": 1
+            },
+            "staging_reachable": {
+              "score": 1,
+              "median": 1,
+              "min": 1,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+            "sourceSha256": "f6217402759f493da3638a08e0438819719a76a0cf691d4e8a5d5d4d89f8e2ef",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "browser": "149.0.7827.55",
+            "snapshot": [
+              {
+                "text": "generation 1",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 2",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 3",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 4",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              }
+            ],
+            "bundleSha256": "4c2de9d46dea7c9ebb74391b80c0886a625ba21755bd269ec8d665c44656a6e4"
+          }
+        },
+        {
+          "name": "vt-work-four-updates",
+          "ops": {
+            "rect_reads": {
+              "score": 8,
+              "median": 8,
+              "min": 8,
+              "samples": 1
+            },
+            "computed_style_reads": {
+              "score": 28,
+              "median": 28,
+              "min": 28,
+              "samples": 1
+            },
+            "native_transitions": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+            "sourceSha256": "f6217402759f493da3638a08e0438819719a76a0cf691d4e8a5d5d4d89f8e2ef",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "browser": "149.0.7827.55",
+            "snapshot": [
+              {
+                "text": "generation 1",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 2",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 3",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              },
+              {
+                "text": "generation 4",
+                "inputIdentity": true,
+                "inputValue": "retained draft",
+                "kinds": ["update"],
+                "animated": true
+              }
+            ]
+          }
+        },
+        {
+          "name": "vt-work-model",
+          "ops": {
+            "updates": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "rect_reads": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "computed_style_reads": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "native_transitions": {
+              "score": 4,
+              "median": 4,
+              "min": 4,
+              "samples": 1
+            },
+            "driver_reachable": {
+              "score": 1,
+              "median": 1,
+              "min": 1,
+              "samples": 1
+            },
+            "staging_reachable": {
+              "score": 1,
+              "median": 1,
+              "min": 1,
+              "samples": 1
+            }
+          },
+          "meta": {
+            "revision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+            "sourceSha256": "f6217402759f493da3638a08e0438819719a76a0cf691d4e8a5d5d4d89f8e2ef",
+            "fixtureSourceSha256": "59b6d1ed4ded69858e8f9abc00136f346a4f6d0e1541329741e61198d1fb2e0d",
+            "node": "v24.20.0",
+            "platform": "darwin",
+            "arch": "arm64",
+            "lockfileSha256": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+            "toolchain": {
+              "vite": "8.1.5",
+              "esbuild": "0.28.1",
+              "tsrxCore": "0.1.71",
+              "playwright": "1.61.1"
+            },
+            "semanticControl": "four completed native animations preserve the input and final text"
+          }
+        }
+      ]
+    }
+  },
+  "validation": {
+    "nativeCandidate": {
+      "passed": 30,
+      "compilerModes": ["dev", "prod"]
+    },
+    "baselineControls": {
+      "passed": 6,
+      "contracts": [
+        "focused survivor selection and scroll",
+        "gated DOM and lifecycle publication",
+        "urgent update before gated native callback"
+      ]
+    },
+    "ratioGuards": 13
+  },
+  "clientTiming": {
+    "preparation": {
+      "baseline": {
+        "node": "v24.20.0",
+        "sourceRoot": "/private/tmp/octane-vt-final-base-277",
+        "compilerRoot": "/Users/domgan/.codex/worktrees/octane-react-view-transition-parity",
+        "runtimeSha256": "139fddb5fe3fcb12b76e3a776df6a774381447ecdc160edeadea87d90e8e30f2",
+        "sourceSha256": "20ce1e8bf1a1ceb4c88b52b265f48f517f91c1d6c327bf8e7684cd027062e0f5",
+        "compiledSha256": "564444bb70b0a9df3c6b0c6f37b3d08ebca4a392a73350b788ae2543e3f3509b",
+        "bundle": {
+          "minified": 196544,
+          "gzip": 60371
+        },
+        "targets": [
+          {
+            "name": "branches-stable",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-stable-work-budget",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-toggle",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-toggle-work-budget",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-absent",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-absent-work-budget",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-mount",
+            "ops": {
+              "hydration_lookups": {
+                "score": 1024,
+                "median": 1024,
+                "min": 1024,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-mount-work-budget",
+            "ops": {
+              "hydration_lookups": {
+                "score": 1024,
+                "median": 1024,
+                "min": 1024,
+                "samples": 1
+              }
+            }
+          }
+        ]
+      },
+      "candidate": {
+        "node": "v24.20.0",
+        "sourceRoot": "/Users/domgan/.codex/worktrees/octane-react-view-transition-parity",
+        "compilerRoot": "/Users/domgan/.codex/worktrees/octane-react-view-transition-parity",
+        "runtimeSha256": "5c13d8dc29ff9e86f631c1e2295e5e3827a522a279a225d559e46ab02e7ae4e2",
+        "sourceSha256": "20ce1e8bf1a1ceb4c88b52b265f48f517f91c1d6c327bf8e7684cd027062e0f5",
+        "compiledSha256": "564444bb70b0a9df3c6b0c6f37b3d08ebca4a392a73350b788ae2543e3f3509b",
+        "bundle": {
+          "minified": 200213,
+          "gzip": 61396
+        },
+        "targets": [
+          {
+            "name": "branches-stable",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-stable-work-budget",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-toggle",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-toggle-work-budget",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-absent",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-absent-work-budget",
+            "ops": {
+              "hydration_lookups": {
+                "score": 512,
+                "median": 512,
+                "min": 512,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-mount",
+            "ops": {
+              "hydration_lookups": {
+                "score": 1024,
+                "median": 1024,
+                "min": 1024,
+                "samples": 1
+              }
+            }
+          },
+          {
+            "name": "branches-mount-work-budget",
+            "ops": {
+              "hydration_lookups": {
+                "score": 1024,
+                "median": 1024,
+                "min": 1024,
+                "samples": 1
+              }
+            }
+          }
+        ]
+      }
+    },
+    "run": {
+      "node": "v24.20.0",
+      "chromium": "149.0.7827.55",
+      "platform": "darwin",
+      "arch": "arm64",
+      "samples": 30,
+      "cycles": 4096,
+      "warmup": 4096,
+      "unit": "ms per update",
+      "results": [
+        {
+          "mode": "stable",
+          "file": "/private/tmp/octane-vt-branches/baseline/branches.mjs",
+          "bundleHash": "bb429ac36057f3cd6111bf79935066cec7152bd411c6d970a370e7e1fdfbaba1",
+          "semantic": {
+            "text": "value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976",
+            "buttons": 32,
+            "effects": 126977,
+            "cleanups": 126976
+          },
+          "median": 0.021166992199141532,
+          "min": 0.017333984375,
+          "max": 0.024169921875,
+          "samples": [
+            0.017846679664216936, 0.017333984375, 0.017675781273283064, 0.019238281238358468,
+            0.01904296875, 0.02197265625, 0.0181884765625, 0.0179443359375, 0.019360351550858468,
+            0.019506835960783064, 0.01953125, 0.019287109375, 0.019799804664216936,
+            0.019848632800858468, 0.019555664097424597, 0.02001953125, 0.022241210972424597,
+            0.021459960960783064, 0.021459960960783064, 0.021337890590075403, 0.021557617175858468,
+            0.021655273449141532, 0.024169921875, 0.021264648414216936, 0.021313476550858468,
+            0.021459960902575403, 0.021459960902575403, 0.021459960960783064, 0.021166992199141532,
+            0.022192382835783064
+          ]
+        },
+        {
+          "mode": "stable",
+          "file": "/private/tmp/octane-vt-branches/candidate/branches.mjs",
+          "bundleHash": "4fecbf5ad504c2a1a4e0ce58c662bc872125f7db7da0d81a7d458e803233d298",
+          "semantic": {
+            "text": "value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976",
+            "buttons": 32,
+            "effects": 126977,
+            "cleanups": 126976
+          },
+          "median": 0.020751953125,
+          "min": 0.017187500023283064,
+          "max": 0.02412109379656613,
+          "samples": [
+            0.017504882824141532, 0.017187500023283064, 0.017407226550858468, 0.019091796886641532,
+            0.019604492175858468, 0.018945312476716936, 0.020654296851716936, 0.018261718738358468,
+            0.02412109379656613, 0.01911621098406613, 0.019067382789216936, 0.018945312476716936,
+            0.0191650390625, 0.018725585949141532, 0.019018554710783064, 0.02099609375,
+            0.021313476550858468, 0.021093750023283064, 0.021240234375, 0.02143554692156613,
+            0.021142578159924597, 0.021142578101716936, 0.021948242210783064, 0.020678710949141532,
+            0.020825195300858468, 0.020751953125, 0.020800781261641532, 0.020898437476716936,
+            0.020751953125, 0.021044921886641532
+          ]
+        },
+        {
+          "mode": "toggle",
+          "file": "/private/tmp/octane-vt-branches/baseline/branches.mjs",
+          "bundleHash": "bb429ac36057f3cd6111bf79935066cec7152bd411c6d970a370e7e1fdfbaba1",
+          "semantic": {
+            "text": "value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976",
+            "buttons": 32,
+            "effects": 126977,
+            "cleanups": 126976
+          },
+          "median": 0.028417968773283064,
+          "min": 0.018994140613358468,
+          "max": 0.034692382789216936,
+          "samples": [
+            0.032202148460783064, 0.0323730469099246, 0.030249023402575403, 0.02961425785906613,
+            0.02753906254656613, 0.028417968773283064, 0.028295898460783064, 0.029614257800858468,
+            0.028881835925858468, 0.034692382789216936, 0.030004882835783064, 0.03291015623835847,
+            0.0311279296875, 0.02861328120343387, 0.028979492199141532, 0.027905273425858468,
+            0.028515624988358468, 0.025585937488358468, 0.024438476539216936, 0.032617187476716936,
+            0.025854492210783064, 0.02387695317156613, 0.021826171840075403, 0.021557617175858468,
+            0.0206298828125, 0.019677734351716936, 0.019873046898283064, 0.019335937511641532,
+            0.018994140613358468, 0.019311523414216936
+          ]
+        },
+        {
+          "mode": "toggle",
+          "file": "/private/tmp/octane-vt-branches/candidate/branches.mjs",
+          "bundleHash": "4fecbf5ad504c2a1a4e0ce58c662bc872125f7db7da0d81a7d458e803233d298",
+          "semantic": {
+            "text": "value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976value:126976",
+            "buttons": 32,
+            "effects": 126977,
+            "cleanups": 126976
+          },
+          "median": 0.028613281261641532,
+          "min": 0.020239257835783064,
+          "max": 0.03913574217585847,
+          "samples": [
+            0.032568359398283064, 0.03913574217585847, 0.03076171875, 0.028979492199141532,
+            0.028247070324141532, 0.029052734375, 0.02873535151593387, 0.029150390648283064,
+            0.02888183598406613, 0.028564453125, 0.028613281261641532, 0.032983398414216936,
+            0.029345703136641532, 0.030126953090075403, 0.028710937534924597, 0.027587890625,
+            0.028002929699141532, 0.0294189453125, 0.024267578148283064, 0.024145507777575403,
+            0.023657226585783064, 0.024145507835783064, 0.021752929664216936, 0.020727539085783064,
+            0.020288085972424597, 0.028857421886641532, 0.020532226597424597, 0.020239257835783064,
+            0.020776367164216936, 0.020288085972424597
+          ]
+        },
+        {
+          "mode": "absent",
+          "file": "/private/tmp/octane-vt-branches/baseline/branches.mjs",
+          "bundleHash": "bb429ac36057f3cd6111bf79935066cec7152bd411c6d970a370e7e1fdfbaba1",
+          "semantic": {
+            "text": "",
+            "buttons": 0,
+            "effects": 126977,
+            "cleanups": 126976
+          },
+          "median": 0.000732421875,
+          "min": 0.0006835937383584678,
+          "max": 0.0008544921875,
+          "samples": [
+            0.000732421875, 0.0008056641090661287, 0.0006835937383584678, 0.0006835937383584678,
+            0.0007812500116415322, 0.0007080078357830644, 0.0007568359142169356, 0.0008544921875,
+            0.0007080078357830644, 0.0007080078357830644, 0.0008056640508584678, 0.000732421875,
+            0.0007080078357830644, 0.0008544921875, 0.000732421875, 0.0007080078357830644,
+            0.0007080077775754035, 0.0007080078357830644, 0.0007812500116415322,
+            0.0007080077775754035, 0.0007812500116415322, 0.0008056640508584678,
+            0.0006835937383584678, 0.000732421875, 0.0008056640508584678, 0.000732421875,
+            0.000732421875, 0.0008056640508584678, 0.0006835937383584678, 0.0006835937383584678
+          ]
+        },
+        {
+          "mode": "absent",
+          "file": "/private/tmp/octane-vt-branches/candidate/branches.mjs",
+          "bundleHash": "4fecbf5ad504c2a1a4e0ce58c662bc872125f7db7da0d81a7d458e803233d298",
+          "semantic": {
+            "text": "",
+            "buttons": 0,
+            "effects": 126977,
+            "cleanups": 126976
+          },
+          "median": 0.000732421875,
+          "min": 0.0006835937383584678,
+          "max": 0.0010009765392169356,
+          "samples": [
+            0.0010009765392169356, 0.0006835937383584678, 0.000732421875, 0.000732421875,
+            0.0007080077775754035, 0.0008056640508584678, 0.0006835937383584678,
+            0.0007568359142169356, 0.0008544921875, 0.0007080078357830644, 0.0007080077775754035,
+            0.0008544921875, 0.0007568359724245965, 0.0007080078357830644, 0.0008300781482830644,
+            0.0007080077775754035, 0.0007080078357830644, 0.0007080078357830644,
+            0.0007080077775754035, 0.0008300781482830644, 0.000732421875, 0.0007080078357830644,
+            0.0008300780900754035, 0.0006835937383584678, 0.000732421875, 0.0008300781482830644,
+            0.000732421875, 0.0007080078357830644, 0.0008300781482830644, 0.0007080077775754035
+          ]
+        }
+      ]
+    },
+    "summary": {
+      "stable": {
+        "baseline": {
+          "medianUs": 20.593261724570766,
+          "p10Us": 17.846679664216936,
+          "p90Us": 21.97265625
+        },
+        "candidate": {
+          "medianUs": 20.715332037070766,
+          "p10Us": 17.504882824141532,
+          "p90Us": 21.313476550858468
+        },
+        "medianDeltaPercent": 0.5927682274554424,
+        "pairedRatios": [
+          0.9808481551467125, 0.9915492971178511, 0.9848066278784228, 0.9923857880076695,
+          1.0294871788758497, 0.8622222211625841, 1.135570468518558, 1.0176870741811739,
+          1.2459016424986644, 0.9799749699283751, 0.9762499988079071, 0.9822784798054756,
+          0.9679408149483357, 0.9434194353341877, 0.9725343315386427, 1.048780487804878,
+          0.9582875940201113, 0.9829351536021323, 0.9897610910763257, 1.0045766628654542,
+          0.9807474540183106, 0.976324688366153, 0.9080808090441155, 0.9724454665949868,
+          0.9770904925418968, 0.9670079651687327, 0.9692832785704301, 0.9738339000200288,
+          0.9803921563235439, 0.9482948290126213
+        ]
+      },
+      "toggle": {
+        "baseline": {
+          "medianUs": 28.356933617033064,
+          "p10Us": 19.335937511641532,
+          "p90Us": 32.3730469099246
+        },
+        "candidate": {
+          "medianUs": 28.588867193320766,
+          "p10Us": 20.288085972424597,
+          "p90Us": 30.76171875
+        },
+        "medianDeltaPercent": 0.8179078154923802,
+        "pairedRatios": [
+          1.0113722516976154, 1.2088989425292753, 1.0169491537165112, 0.978565538837899,
+          1.0257092185465, 1.0223367689218417, 1.0155306273720155, 0.9843363573149567,
+          1.0000000020153725, 0.82336382884252, 0.9536208295910443, 1.0022255189348843,
+          0.9427450984132056, 1.0529010243837353, 0.9907329409924964, 0.9886264221097234,
+          0.9820205487543673, 1.1498091608285035, 0.9930069949057738, 0.7402694605355273,
+          0.9150141643824824, 1.0112474427657188, 0.9966442958300188, 0.9614949053365242,
+          0.9834319543556349, 1.4665012430215902, 1.033169533716467, 1.046717172291112,
+          1.093830333634839, 1.0505689032015324
+        ]
+      },
+      "absent": {
+        "baseline": {
+          "medianUs": 0.732421875,
+          "p10Us": 0.6835937383584678,
+          "p90Us": 0.8056640508584678
+        },
+        "candidate": {
+          "medianUs": 0.732421875,
+          "p10Us": 0.6835937383584678,
+          "p90Us": 0.8300781482830644
+        },
+        "medianDeltaPercent": 0.0,
+        "pairedRatios": [
+          1.3666666348775227, 0.8484847849941378, 1.0714285896748916, 1.0714285896748916,
+          0.90624994179234, 1.1379309806188722, 0.903225818856326, 0.8857142584664481,
+          1.2068965120349584, 1.0, 0.8787878481371887, 1.1666666666666667, 1.0689655314160862,
+          0.8285714558192662, 1.1333333651224773, 0.9999999177866996, 1.0000000822133073, 1.0,
+          0.90624994179234, 1.1724138838215803, 0.9374999860301616, 0.878787920385244,
+          1.2142856838751808, 0.9333333174387614, 0.9090909222269191, 1.1333333651224773, 1.0,
+          0.878787920385244, 1.2142857690246747, 1.0357142522626988
+        ]
+      }
+    },
+    "summaryMethod": "Medians average the two middle samples; p10 and p90 use nearest rank. The retained original harness report uses the upper middle sample in its median field.",
+    "limitations": "Other applications and jobs were present. Local Octane tests and benchmarks were serialized before the final alternating run. The overlapping distributions do not establish a meaningful latency improvement or regression. Preparation timing is excluded."
+  },
+  "ssr": {
+    "node": "v24.20.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "baselineRevision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+    "candidateRevision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+    "compiledHash": "7f067773921133dded9507203597ce202601ac240038482ea477332ff78dc1fe",
+    "lockfileHash": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+    "method": "Identical compiled fixture; production minified bundles; five warmup batches per side; 11 paired alternating batches; same process/dependencies; per-operation batch times in milliseconds. Ready:50000 warmup/10000 per sample; streamed:5000 warmup/1000 per sample.",
+    "limitations": [
+      "Small synthetic server-only scenarios; browser capture/animation/resource waits, backpressure, concurrency, and allocation/GC behavior are not measured.",
+      "The streamed VT candidate performs additional functionality and emits an animation driver; its wire output is intentionally larger.",
+      "Batch timings and observed spread limit conclusions about individual latency; distributions are descriptive, not a performance guarantee."
+    ],
+    "meta": {
+      "baseline": {
+        "root": "/private/tmp/octane-vt-final-base-277",
+        "sourceTreeHash": "632e4d223dcf980ecbdfdd0a7535f1d50c43ddd00edd0ccc242a3668bc361f17",
+        "serverSourceHash": "019bb224b8afee7b2675ff80ed1e95bc355f1871f1e399bd1271849ba8af609f",
+        "bundleHash": "d736f115da0f2fae856f0203c42f4f26d449fcb606e5ab94ab4eb6d18b7b51b8",
+        "bundleBytes": 62802,
+        "bundleGzip": 21746
+      },
+      "candidate": {
+        "root": "/private/tmp/octane-vt-ssr-final-candidate-7cd",
+        "sourceTreeHash": "059c023116060251aa5cf2c48464d764ce6bdab3ab6ffa90d3181a50ad76d082",
+        "serverSourceHash": "3ab0f5e751b5bc7317e09b7cb590d772724d8069d967a2b98d5fdfcb3220191d",
+        "bundleHash": "0bc18f93d6db5cfc7b8d70e5e1a7932c6c7b46ae7f23e7f88fb05eef6cc13b57",
+        "bundleBytes": 70420,
+        "bundleGzip": 24057
+      }
+    },
+    "samples": {
+      "Plain": {
+        "repetitions": 10000,
+        "warmupRepetitions": 50000,
+        "baseline": [
+          0.0006825666000000069, 0.0005152791999999977, 0.0005269665999999916,
+          0.0005009750000000054, 0.00045452499999998965, 0.0005999833999999965,
+          0.0005647208000000092, 0.000573983300000009, 0.000541441599999996, 0.0006755541000000107,
+          0.000522670800000003
+        ],
+        "candidate": [
+          0.0006205208000000085, 0.000554362500000002, 0.0005095458000000007,
+          0.00048172910000000683, 0.0005660750000000007, 0.0005741624999999999,
+          0.0005730832999999961, 0.0005435540999999944, 0.00046490420000000086,
+          0.0005814666999999986, 0.0005012459000000035
+        ],
+        "wire": {
+          "baseline": {
+            "bytes": 31,
+            "gzip": 45,
+            "hasAnimationDriver": false,
+            "scriptBytes": 0
+          },
+          "candidate": {
+            "bytes": 31,
+            "gzip": 45,
+            "hasAnimationDriver": false,
+            "scriptBytes": 0
+          }
+        },
+        "baselineMedianMs": 0.000541441599999996,
+        "baselineDistributionMs": {
+          "min": 0.00045452499999998965,
+          "p25": 0.0005152791999999977,
+          "median": 0.000541441599999996,
+          "p75": 0.0005999833999999965,
+          "max": 0.0006825666000000069
+        },
+        "baselineMedianOpsPerSecond": 1846921.2561428738,
+        "candidateMedianMs": 0.000554362500000002,
+        "candidateDistributionMs": {
+          "min": 0.00046490420000000086,
+          "p25": 0.0005012459000000035,
+          "median": 0.000554362500000002,
+          "p75": 0.0005741624999999999,
+          "max": 0.0006205208000000085
+        },
+        "candidateMedianOpsPerSecond": 1803873.8190263526,
+        "pairedCandidateBaselineRatios": [
+          0.909099273243083, 1.0758487825629377, 0.966941358332784, 0.9615831129297903,
+          1.2454210439470077, 0.9569639760033415, 1.0148082025666256, 0.946985914050088,
+          0.8586414490500994, 0.860725588076498, 0.9590088063079105
+        ]
+      },
+      "View": {
+        "repetitions": 10000,
+        "warmupRepetitions": 50000,
+        "baseline": [
+          0.0016880916999999953, 0.0017038291999999955, 0.0016360875000000078,
+          0.0015999291999999968, 0.0016740125000000035, 0.0017027417000000013, 0.001852862499999992,
+          0.0017137083999999958, 0.0017810707999999977, 0.0016595708999999942, 0.0016904374999999845
+        ],
+        "candidate": [
+          0.002491041600000017, 0.002112308299999995, 0.002070724999999993, 0.0021368667000000187,
+          0.002202512499999989, 0.0024013958000000005, 0.0023218583999999962, 0.0023122917000000143,
+          0.0020877958000000037, 0.002110920800000008, 0.0019865958000000092
+        ],
+        "wire": {
+          "baseline": {
+            "bytes": 113,
+            "gzip": 105,
+            "hasAnimationDriver": false,
+            "scriptBytes": 0
+          },
+          "candidate": {
+            "bytes": 113,
+            "gzip": 105,
+            "hasAnimationDriver": false,
+            "scriptBytes": 0
+          }
+        },
+        "baselineMedianMs": 0.0016904374999999845,
+        "baselineDistributionMs": {
+          "min": 0.0015999291999999968,
+          "p25": 0.0016595708999999942,
+          "median": 0.0016904374999999845,
+          "p75": 0.0017137083999999958,
+          "max": 0.001852862499999992
+        },
+        "baselineMedianOpsPerSecond": 591562.8350648924,
+        "candidateMedianMs": 0.0021368667000000187,
+        "candidateDistributionMs": {
+          "min": 0.0019865958000000092,
+          "p25": 0.0020877958000000037,
+          "median": 0.0021368667000000187,
+          "p75": 0.0023218583999999962,
+          "max": 0.002491041600000017
+        },
+        "candidateMedianOpsPerSecond": 467974.9092444518,
+        "pairedCandidateBaselineRatios": [
+          1.4756553805696835, 1.2397418121487769, 1.2656566351127205, 1.3356007878348761,
+          1.3157085147213563, 1.410311264474229, 1.2531196459532243, 1.3492912213069739,
+          1.1722138165422769, 1.271967832166746, 1.1751962435760135
+        ]
+      },
+      "PlainStream": {
+        "repetitions": 1000,
+        "warmupRepetitions": 5000,
+        "baseline": [
+          0.056487249999999906, 0.07630520800000022, 0.03992979200000036, 0.0514697500000002,
+          0.04352133400000002, 0.04088625000000002, 0.04652220800000032, 0.0500949999999998,
+          0.04319495899999993, 0.052400834000000035, 0.04672154199999977
+        ],
+        "candidate": [
+          0.04669079099999999, 0.09039587499999971, 0.05286537499999986, 0.04627816699999994,
+          0.04480400000000009, 0.03823733300000003, 0.05025454199999967, 0.045057917000000086,
+          0.053544625, 0.046449083999999856, 0.0740352499999999
+        ],
+        "wire": {
+          "baseline": {
+            "bytes": 2381,
+            "gzip": 1033,
+            "hasAnimationDriver": false,
+            "scriptBytes": 2047
+          },
+          "candidate": {
+            "bytes": 2443,
+            "gzip": 1037,
+            "hasAnimationDriver": false,
+            "scriptBytes": 2109
+          }
+        },
+        "baselineMedianMs": 0.04672154199999977,
+        "baselineDistributionMs": {
+          "min": 0.03992979200000036,
+          "p25": 0.04319495899999993,
+          "median": 0.04672154199999977,
+          "p75": 0.052400834000000035,
+          "max": 0.07630520800000022
+        },
+        "baselineMedianOpsPerSecond": 21403.40316678771,
+        "candidateMedianMs": 0.04669079099999999,
+        "candidateDistributionMs": {
+          "min": 0.03823733300000003,
+          "p25": 0.045057917000000086,
+          "median": 0.04669079099999999,
+          "p75": 0.053544625,
+          "max": 0.09039587499999971
+        },
+        "candidateMedianOpsPerSecond": 21417.499652126266,
+        "pairedCandidateBaselineRatios": [
+          0.8265722087727774, 1.184661930283965, 1.3239581864087693, 0.8991333161711443,
+          1.0294721205007196, 0.9352125225473115, 1.0802269316193962, 0.8994493861662893,
+          1.239603561147033, 0.8864187924947878, 1.5846063043039176
+        ]
+      },
+      "ViewStream": {
+        "repetitions": 1000,
+        "warmupRepetitions": 5000,
+        "baseline": [
+          0.06074762499999997, 0.04938237499999969, 0.05175887499999999, 0.059912540999999694,
+          0.05300316700000076, 0.051962083000000346, 0.05064666699999998, 0.05194425000000046,
+          0.04553237499999978, 0.06125099999999929, 0.06079841699999997
+        ],
+        "candidate": [
+          0.07453145899999981, 0.06747050000000035, 0.0626719579999999, 0.0602269580000002,
+          0.06544966700000077, 0.05991233300000022, 0.05829912500000046, 0.05935875000000033,
+          0.06553091700000005, 0.06807924999999977, 0.06311450000000059
+        ],
+        "wire": {
+          "baseline": {
+            "bytes": 2525,
+            "gzip": 1087,
+            "hasAnimationDriver": false,
+            "scriptBytes": 2105
+          },
+          "candidate": {
+            "bytes": 9185,
+            "gzip": 2972,
+            "hasAnimationDriver": true,
+            "scriptBytes": 8763
+          }
+        },
+        "baselineMedianMs": 0.051962083000000346,
+        "baselineDistributionMs": {
+          "min": 0.04553237499999978,
+          "p25": 0.05064666699999998,
+          "median": 0.051962083000000346,
+          "p75": 0.06074762499999997,
+          "max": 0.06125099999999929
+        },
+        "baselineMedianOpsPerSecond": 19244.80202227446,
+        "candidateMedianMs": 0.06311450000000059,
+        "candidateDistributionMs": {
+          "min": 0.05829912500000046,
+          "p25": 0.05991233300000022,
+          "median": 0.06311450000000059,
+          "p75": 0.06747050000000035,
+          "max": 0.07453145899999981
+        },
+        "candidateMedianOpsPerSecond": 15844.2196325724,
+        "pairedCandidateBaselineRatios": [
+          1.2269032575347572, 1.3662870609200302, 1.210844671565986, 1.0052479329828543,
+          1.2348255907047936, 1.153000987277585, 1.1510949970311073, 1.1427395717524038,
+          1.4392158766152736, 1.1114798125744978, 1.038094462229183
+        ]
+      }
+    }
+  },
+  "ssrPortableVerification": {
+    "node": "v24.20.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "verifyOnly": true,
+    "baselineRevision": "277c10c3fa80f56ef162959832dba35c1b43b32e",
+    "candidateRevision": "7cd542853722ba38ff520507b9608b5eafb83d82",
+    "compiledHash": "7f067773921133dded9507203597ce202601ac240038482ea477332ff78dc1fe",
+    "lockfileHash": "1c3467abe3f112e1f5b5f25589fa19f72765195351ddd6d1a6a35c45db231873",
+    "method": "Build and verify authored output once per scenario; no timing samples. Stream IDs differ from a full run, so wire compression may differ.",
+    "limitations": [
+      "Small synthetic server-only scenarios; browser capture/animation/resource waits, backpressure, concurrency, and allocation/GC behavior are not measured.",
+      "The streamed VT candidate performs additional functionality and emits an animation driver; its wire output is intentionally larger.",
+      "Batch timings and observed spread limit conclusions about individual latency; distributions are descriptive, not a performance guarantee."
+    ],
+    "meta": {
+      "baseline": {
+        "sourceSha256": "3a546f6cb3dd85604e2f401ab916c51c0f7d44a816789a0346e076579f954f4a",
+        "serverSourceHash": "019bb224b8afee7b2675ff80ed1e95bc355f1871f1e399bd1271849ba8af609f",
+        "bundleHash": "d736f115da0f2fae856f0203c42f4f26d449fcb606e5ab94ab4eb6d18b7b51b8",
+        "bundleBytes": 62802,
+        "bundleGzip": 21746
+      },
+      "candidate": {
+        "sourceSha256": "f6217402759f493da3638a08e0438819719a76a0cf691d4e8a5d5d4d89f8e2ef",
+        "serverSourceHash": "3ab0f5e751b5bc7317e09b7cb590d772724d8069d967a2b98d5fdfcb3220191d",
+        "bundleHash": "0bc18f93d6db5cfc7b8d70e5e1a7932c6c7b46ae7f23e7f88fb05eef6cc13b57",
+        "bundleBytes": 70420,
+        "bundleGzip": 24057
+      }
+    },
+    "samples": {
+      "Plain": {
+        "repetitions": 10000,
+        "warmupRepetitions": 50000,
+        "baseline": [],
+        "candidate": [],
+        "wire": {
+          "baseline": {
+            "bytes": 31,
+            "gzip": 45,
+            "hasAnimationDriver": false,
+            "scriptBytes": 0
+          },
+          "candidate": {
+            "bytes": 31,
+            "gzip": 45,
+            "hasAnimationDriver": false,
+            "scriptBytes": 0
+          }
+        }
+      },
+      "View": {
+        "repetitions": 10000,
+        "warmupRepetitions": 50000,
+        "baseline": [],
+        "candidate": [],
+        "wire": {
+          "baseline": {
+            "bytes": 113,
+            "gzip": 105,
+            "hasAnimationDriver": false,
+            "scriptBytes": 0
+          },
+          "candidate": {
+            "bytes": 113,
+            "gzip": 105,
+            "hasAnimationDriver": false,
+            "scriptBytes": 0
+          }
+        }
+      },
+      "PlainStream": {
+        "repetitions": 1000,
+        "warmupRepetitions": 5000,
+        "baseline": [],
+        "candidate": [],
+        "wire": {
+          "baseline": {
+            "bytes": 2381,
+            "gzip": 1031,
+            "hasAnimationDriver": false,
+            "scriptBytes": 2047
+          },
+          "candidate": {
+            "bytes": 2443,
+            "gzip": 1038,
+            "hasAnimationDriver": false,
+            "scriptBytes": 2109
+          }
+        }
+      },
+      "ViewStream": {
+        "repetitions": 1000,
+        "warmupRepetitions": 5000,
+        "baseline": [],
+        "candidate": [],
+        "wire": {
+          "baseline": {
+            "bytes": 2519,
+            "gzip": 1084,
+            "hasAnimationDriver": false,
+            "scriptBytes": 2103
+          },
+          "candidate": {
+            "bytes": 9179,
+            "gzip": 2971,
+            "hasAnimationDriver": true,
+            "scriptBytes": 8761
+          }
+        }
+      }
+    }
+  }
+}

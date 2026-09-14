@@ -2,8 +2,10 @@
 
 This suite measures production bundle bytes, optional driver reachability, and
 browser reads around native View Transitions. It reuses the published-API
-minimal root/state fixtures and the native parity browser fixture. It makes no
-claim about latency, paint cost, garbage collection, or V8 allocations.
+minimal root/state fixtures and the native parity browser fixture. Its
+byte/read runner does not measure latency, paint cost, garbage collection, or
+V8 allocations. The recorded comparison describes the separate client hot-path
+timing harness and its measurement limits.
 
 ```sh
 node benchmarks/bench.mjs --quick --ratios view-transitions
@@ -16,6 +18,9 @@ the established Activity benchmark helper. Baseline and candidate use the same
 authored fixtures, dependencies, production options and machine. Source,
 lockfile and bundle hashes plus tool/browser versions accompany the results.
 The runner rejects a source change during measurements.
+
+[Recorded comparison and measurement limits](./RESULTS.md) include the final
+main/candidate revisions, byte and browser-work deltas, and timing distributions.
 
 ## Controls
 
@@ -81,3 +86,15 @@ The font tests reuse the existing
 `benchmarks/tanstack-com/octane/public/fonts/Inter-latin.woff2` fixture, with no
 new copy or external request. Inter is by the Inter Project Authors and uses
 the [SIL Open Font License 1.1](https://github.com/rsms/inter/blob/master/LICENSE.txt).
+
+## Supplementary server comparison
+
+```sh
+BENCH_JSON=/tmp/vt-ssr.json node benchmarks/view-transitions/ssr.mjs --octane-revision=277c10c3fa80f56ef162959832dba35c1b43b32e
+```
+
+This separate paired runner compares ready renders and suspended streams,
+reporting warm batch timing distributions, wire/script bytes and the combined
+server bundle. The baseline and current checkout use the same compiled fixture
+and dependencies. It is a focused server comparison rather than a browser,
+backpressure or concurrent-request benchmark; see [the recorded limits](./RESULTS.md).

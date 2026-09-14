@@ -110,7 +110,8 @@ callback publishes the ordered DOM changes once, together with insertion effects
 and outgoing layout cleanup. Newly requested fonts and eligible visible images can delay layout refs
 and effects by up to 500 ms. The new snapshot waits for a navigation that was
 already pending before mutations. Resource failures or the timeout allow the
-commit to continue. Lazy and offscreen images do not hold the capture.
+commit to continue. Lazy and offscreen images do not hold the capture. As in
+React, an image with an `onLoad` handler opts out of the client resource wait.
 
 Urgent work finishes pending layout work and skips the animation. Unchanged or
 `none` boundaries do not receive separate new captures. The default root overlay

@@ -8378,5 +8378,21 @@
     "reference": "vt-work-model",
     "maxRatio": 0,
     "note": "The optional DOM staging adapter must be absent from ordinary production imports; compiled text, state, event, identity and cleanup controls execute the measured bundles."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "rect_reads",
+    "target": "vt-work-four-updates",
+    "reference": "vt-work-model",
+    "maxRatio": 2,
+    "note": "Four completed native updates read eight rectangles (old and new boundary geometry). Preserve this measured two-read budget per update, with actual animation and retained input controls."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "computed_style_reads",
+    "target": "vt-work-four-updates",
+    "reference": "vt-work-model",
+    "maxRatio": 7,
+    "note": "Four completed native updates read 28 computed styles, including the fixture's public pseudo-element style observations. Preserve this measured seven-read budget per update; this is scenario work, not an isolated internal framework counter."
   }
 ]
