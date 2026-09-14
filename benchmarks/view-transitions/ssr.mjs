@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -34,6 +35,8 @@ export function View(props) @{ <main><ViewTransition name="hero" update="resize"
 function Content(props) @{ const text=use(props.promise) as string; <div>{text}</div> }
 export function PlainStream(props) @{ <main>@try { <Content promise={props.promise} /> } @pending { <p>{'Loading'}</p> }</main> }
 export function ViewStream(props) @{ <main><ViewTransition name="hero" update="resize"><>@try { <Content promise={props.promise} /> } @pending { <p>{'Loading'}</p> }</></ViewTransition></main> }
+export function ScopedView(props) @{ <main><ViewTransition scope="element" name="hero" update="resize"><section><div>{props.text as string}</div></section></ViewTransition></main> }
+export function ScopedViewStream(props) @{ <main><ViewTransition scope="element" name="hero" update="resize"><section>@try { <Content promise={props.promise} /> } @pending { <p>{'Loading'}</p> }</section></ViewTransition></main> }
 `;
 const compiled = compile(source, path.join(repo, 'benchmarks/view-transitions/ssr-control.tsrx'), {
 	mode: 'server',
@@ -99,7 +102,14 @@ try {
 		});
 	}
 	const samples = {};
-	for (const name of ['Plain', 'View', 'PlainStream', 'ViewStream']) {
+	for (const name of [
+		'Plain',
+		'View',
+		'PlainStream',
+		'ViewStream',
+		'ScopedView',
+		'ScopedViewStream',
+	]) {
 		const isStream = name.endsWith('Stream');
 		const reps = isStream ? 1000 : 10000;
 		samples[name] = {
@@ -117,10 +127,22 @@ try {
 			const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((x) => x[1]);
 			if (!html.includes('Content') || (isStream && !html.includes('Loading')))
 				throw new Error('Missing authored output in ' + label + '/' + name);
+			const scopeRoots = [...html.matchAll(/<section\b[^>]*>/g)];
+			if (label === 'candidate' && name.startsWith('Scoped')) {
+				assert.equal(
+					scopeRoots.length,
+					1,
+					'One persistent scope host must wrap ready/streamed content',
+				);
+				assert.match(scopeRoots[0][0], /vt-scope="element"/);
+				assert.match(scopeRoots[0][0], /view-transition-scope:all!important/);
+			}
 			samples[name].wire[label] = {
 				bytes: Buffer.byteLength(html),
 				gzip: gzipSync(html, { level: 9 }).length,
 				hasAnimationDriver: html.includes('$OCTVT'),
+				hasElementScope: /vt-scope="element"/.test(html),
+				scopeHosts: scopeRoots.length,
 				scriptBytes: scripts.reduce((n, s) => n + Buffer.byteLength(s), 0),
 			};
 			for (let i = 0; !verifyOnly && i < reps * 5; i++)
@@ -171,6 +193,7 @@ try {
 		limitations: [
 			'Small synthetic server-only scenarios; browser capture/animation/resource waits, backpressure, concurrency, and allocation/GC behavior are not measured.',
 			'The streamed VT candidate performs additional functionality and emits an animation driver; its wire output is intentionally larger.',
+			'The baseline ignores scope=element. Scoped cases compare the cost of new functionality using identical authored input; they do not claim behavioral equivalence.',
 			'Batch timings and observed spread limit conclusions about individual latency; distributions are descriptive, not a performance guarantee.',
 		],
 		meta,

@@ -98,3 +98,54 @@ reporting warm batch timing distributions, wire/script bytes and the combined
 server bundle. The baseline and current checkout use the same compiled fixture
 and dependencies. It is a focused server comparison rather than a browser,
 backpressure or concurrent-request benchmark; see [the recorded limits](./RESULTS.md).
+
+## Ordinary inline-style control
+
+The scope declaration ownership hook also sits on the ordinary style setter
+path. Reuse all ten cases and four operations from `style-literals-work.mjs`
+with the same authored fixture and the selected revision's complete package
+and compiler:
+
+```sh
+BENCH_JSON=/tmp/vt-style-baseline.json node benchmarks/view-transitions/style.mjs --octane-revision=277c10c3fa80f56ef162959832dba35c1b43b32e
+BENCH_JSON=/tmp/vt-style-candidate.json node benchmarks/view-transitions/style.mjs
+```
+
+This builds readable and minified production assets, checks optional driver and
+DOM staging exclusion, executes the existing CSS/identity/work gates, and records
+source, fixture, lockfile and asset hashes plus raw and gzip bytes. Temporary
+servers and assets are removed after the run. Use the same Node version for both
+variants: gzip output can differ across Node/zlib versions.
+
+Set `WORK_CASES=single,multi,generic WORK_SAMPLES=20` for the existing
+uninstrumented timing pass; leave `WORK_SAMPLES` unset for deterministic work
+only. Alternate baseline–candidate–candidate–baseline on a quiet machine.
+These timings measure mount and early updates in fresh contexts, not steady
+state, and do not measure heap allocation or browser layout cost. The generic
+case is the control for machine variation. Source or fixture changes during a
+run fail the wrapper.
+
+## Scoped native work
+
+The separate scoped runner reuses the element-scope browser fixture. It reports
+bytes and browser API calls for a single scope, siblings, nested scopes, and a
+mixed document/element batch. Minified and instrumented readable builds must
+agree on native owners, successful promises, persistent hosts, final text and
+pseudo-element animation targets. Instrumentation delegates to native APIs;
+counts include the fixture's public pseudo-style observations.
+
+```sh
+VT_SCOPES_BYTES_ONLY=1 BENCH_JSON=/tmp/vt-scopes-baseline.json node benchmarks/view-transitions/scopes.mjs --octane-revision=277c10c3fa80f56ef162959832dba35c1b43b32e
+BENCH_JSON=/tmp/vt-scopes-candidate.json node benchmarks/view-transitions/scopes.mjs
+```
+
+The baseline ignores the new `scope` prop and supplies only a comparable fixture
+byte count. It cannot pass the scoped behavior oracle. This is the cost of new
+functionality, not a latency comparison. The existing document transition
+runner remains the baseline positive native control.
+
+The SSR runner also retains its four ordinary/document controls and adds ready
+and streamed element scopes. The candidate must emit exactly one persistent
+section with `vt-scope="element"` and `view-transition-scope:all!important`.
+The same authored input runs on the baseline, where the scope prop is ignored;
+its wire-size and timing differences likewise include new functionality.
