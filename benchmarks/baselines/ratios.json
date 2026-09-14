@@ -8290,5 +8290,93 @@
     "reference": "wave-budget",
     "maxRatio": 1,
     "note": "Retained 32-wave work:33 full passes, 528 suspended visits, 496 pending probes, 13,728 closure expression events. Positive measured work budgets, with complete output controls; no latency or engine allocation inference."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "driver_reachable",
+    "target": "vt-bundle-root-static",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "Ordinary production imports must exclude the optional View Transition driver; executable output and cleanup are checked before this reachability guard."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "rect_reads",
+    "target": "vt-work-root-static",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "An ordinary root/state update must not acquire View Transition browser work; the same minified bundle preserves its public text, state, event and lifecycle observations."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "computed_style_reads",
+    "target": "vt-work-root-static",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "An ordinary root/state update must not acquire View Transition browser work; the same minified bundle preserves its public text, state, event and lifecycle observations."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "native_transitions",
+    "target": "vt-work-root-static",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "An ordinary root/state update must not acquire View Transition browser work; the same minified bundle preserves its public text, state, event and lifecycle observations."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "driver_reachable",
+    "target": "vt-bundle-hooks-state",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "Ordinary production imports must exclude the optional View Transition driver; executable output and cleanup are checked before this reachability guard."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "rect_reads",
+    "target": "vt-work-hooks-state",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "An ordinary root/state update must not acquire View Transition browser work; the same minified bundle preserves its public text, state, event and lifecycle observations."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "computed_style_reads",
+    "target": "vt-work-hooks-state",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "An ordinary root/state update must not acquire View Transition browser work; the same minified bundle preserves its public text, state, event and lifecycle observations."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "native_transitions",
+    "target": "vt-work-hooks-state",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "An ordinary root/state update must not acquire View Transition browser work; the same minified bundle preserves its public text, state, event and lifecycle observations."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "native_transitions",
+    "target": "vt-work-four-updates",
+    "reference": "vt-work-model",
+    "maxRatio": 1,
+    "note": "Four separately completed updates preserve the input and animate exactly once each; capture work must not exceed one native transition per update."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "staging_reachable",
+    "target": "vt-bundle-root-static",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "The optional DOM staging adapter must be absent from ordinary production imports; compiled text, state, event, identity and cleanup controls execute the measured bundles."
+  },
+  {
+    "suite": "view-transitions",
+    "op": "staging_reachable",
+    "target": "vt-bundle-hooks-state",
+    "reference": "vt-work-model",
+    "maxRatio": 0,
+    "note": "The optional DOM staging adapter must be absent from ordinary production imports; compiled text, state, event, identity and cleanup controls execute the measured bundles."
   }
 ]

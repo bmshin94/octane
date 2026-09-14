@@ -4658,9 +4658,10 @@ export const Suspense = /* @__PURE__ */ markComponentFlags(
 //                Suspense content).
 // Arm-top detection is POSITIONAL, not flag-based (compiled static elements
 // emit as string concatenation — no runtime call to consult): every boundary
-// stamps CANDIDATE attributes (vt-enter-x / vt-exit-x) on its first element;
-// each @try arm then CLAIMS the matching candidate on the arm's first element
-// (renaming -x → real). Ordering makes this exact — an OUTER boundary's
+// stamps CANDIDATE attributes (vt-enter-x / vt-exit-x) on each direct host;
+// each @try arm then CLAIMS matching direct hosts (renaming -x → real) and
+// relays through nested boundaries that opt in with parentEnter/parentExit.
+// Ordering makes this exact — an OUTER boundary's
 // surgery runs after the arm's claim, so its candidates are never claimed by
 // an arm it merely contains. Residual candidates are stripped at the final
 // emission points (buffered html / stream shell / stream segments).
@@ -4673,6 +4674,10 @@ interface VtSsrProps {
 	update?: VtSsrClassValue;
 	share?: VtSsrClassValue;
 	default?: VtSsrClassValue;
+	parentEnter?: VtSsrClassValue;
+	parentExit?: VtSsrClassValue;
+	onParentEnter?: unknown;
+	onParentExit?: unknown;
 	children?: unknown;
 }
 interface VtSsrCandidate {
@@ -4690,45 +4695,15 @@ let VT_SSR_HAS_CANDIDATES = false;
 const VT_SSR_STACK: VtSsrCandidate[] = [];
 
 /** Resolve a class-prop value server-side (no types → maps use `default`). */
-function vtSsrResolve(props: VtSsrProps, kind: 'enter' | 'exit' | 'update' | 'share'): string {
-	let v: VtSsrClassValue | undefined = props[kind];
-	if (v == null) v = props.default;
-	if (v == null) return 'auto';
-	if (typeof v === 'string') return v;
-	return v.default != null ? v.default : 'auto';
-}
-
-/** Skip comment markers and streaming placeholders to locate the visible root. */
-function vtSsrFirstVisibleOpenTag(html: string): number {
-	const n = html.length;
-	let i = 0;
-	while (i < n) {
-		const lt = html.indexOf('<', i);
-		if (lt === -1) return -1;
-		if (html.startsWith('<!--', lt)) {
-			const close = html.indexOf('-->', lt + 4);
-			if (close === -1) return -1;
-			i = close + 3;
-			continue;
-		}
-		const c = html.charCodeAt(lt + 1);
-		if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) {
-			// Not an element open (a closing tag or stray '<' text) — move on.
-			i = lt + 1;
-			continue;
-		}
-		let e = lt + 1;
-		while (e < n && /[a-zA-Z0-9-]/.test(html[e])) e++;
-		if (e - lt === 9 && html.slice(lt + 1, e).toLowerCase() === 'template') {
-			const j = vtSsrOpenTagEnd(html, e);
-			if (j === -1) return -1;
-			const close = html.indexOf('</template>', j);
-			i = close === -1 ? j + 1 : close + 11;
-			continue;
-		}
-		return lt;
-	}
-	return -1;
+function vtSsrResolve(
+	props: VtSsrProps,
+	kind: 'enter' | 'exit' | 'update' | 'share' | 'parentEnter' | 'parentExit',
+): string {
+	const value = props[kind];
+	const resolved = typeof value === 'string' ? value : value?.default;
+	if (resolved != null) return resolved;
+	const fallback = props.default;
+	return (typeof fallback === 'string' ? fallback : fallback?.default) ?? 'auto';
 }
 
 /** Find an opening tag's actual terminator without allocating scan state. */
@@ -4747,52 +4722,119 @@ function vtSsrOpenTagEnd(html: string, from: number): number {
 	return -1;
 }
 
-/**
- * Inject `vt-*` attributes into the first visible element's opening tag.
- * An inner boundary owns attributes it has already placed on the same root.
- */
-function vtSsrAnnotate(html: string, attrs: Array<[string, string]>): string {
-	const start = vtSsrFirstVisibleOpenTag(html);
-	if (start === -1) return html;
-	const end = vtSsrOpenTagEnd(html, start + 1);
-	if (end === -1) return html;
-	const open = html.slice(start, end);
-	let inject = '';
-	for (let index = 0; index < attrs.length; index++) {
-		if (open.indexOf(attrs[index][0] + '="') === -1) {
-			inject += ' ' + attrs[index][0] + '="' + escapeAttr(attrs[index][1]) + '"';
+/** Walk rendered opening tags without interpreting quoted attributes or raw text as markup. */
+function vtSsrMapTags(html: string, visit: (open: string, depth: number) => string): string {
+	let depth = 0;
+	let from = 0;
+	let copied = 0;
+	let out = '';
+	while (from < html.length) {
+		const start = html.indexOf('<', from);
+		if (start < 0) break;
+		if (html.startsWith('<!--', start)) {
+			const end = html.indexOf('-->', start + 4);
+			if (end < 0) break;
+			from = end + 3;
+			continue;
 		}
+		const closing = html[start + 1] === '/';
+		const nameStart = start + (closing ? 2 : 1);
+		const initial = html.charCodeAt(nameStart);
+		if (!((initial >= 65 && initial <= 90) || (initial >= 97 && initial <= 122))) {
+			from = start + 1;
+			continue;
+		}
+		let nameEnd = nameStart + 1;
+		while (nameEnd < html.length && /[a-zA-Z0-9:-]/.test(html[nameEnd])) nameEnd++;
+		const tag = html.slice(nameStart, nameEnd).toLowerCase();
+		const end = vtSsrOpenTagEnd(html, nameStart + tag.length);
+		if (end < 0) break;
+		from = end + 1;
+		if (closing) {
+			depth = Math.max(0, depth - 1);
+			continue;
+		}
+		// Resource tags are not visual hosts. Templates hold inert transport markup.
+		if (tag === 'template' || tag === 'script' || tag === 'style' || tag === 'title') {
+			const close = html.indexOf('</' + tag + '>', from);
+			if (close >= 0) from = close + tag.length + 3;
+			continue;
+		}
+		const isVoid = VOID_ELEMENTS.has(tag) || html[end - 1] === '/';
+		if (tag !== 'link' && tag !== 'meta' && tag !== 'base' && tag !== 'option') {
+			const open = html.slice(start, end + 1);
+			const next = visit(open, depth);
+			if (next !== open) {
+				out += html.slice(copied, start) + next;
+				copied = end + 1;
+			}
+		}
+		if (!isVoid) depth++;
 	}
-	if (inject === '') return html;
-	const insertion = html[end - 1] === '/' ? end - 1 : end;
-	return html.slice(0, insertion) + inject + html.slice(insertion);
+	return copied === 0 ? html : out + html.slice(copied);
 }
 
-/**
- * Claim an arm-top candidate: rename `vt-enter-x`/`vt-exit-x` → `vt-enter`/
- * `vt-exit` on the FIRST element of an arm's HTML (same template/comment
- * skipping as vtSsrAnnotate). A first element without the candidate (e.g. a
- * static wrapper above the boundary, or an outer boundary's annotation target)
- * claims nothing — that is exactly React's "top of the arm only" rule.
- */
+function vtSsrInject(open: string, attrs: Array<[string, string]>): string {
+	let inject = '';
+	for (const [name, value] of attrs) {
+		if (open.indexOf(' ' + name + '="') === -1)
+			inject += ' ' + name + '="' + escapeAttr(value) + '"';
+	}
+	if (inject === '') return open;
+	const insertion = open[open.length - 2] === '/' ? open.length - 2 : open.length - 1;
+	return open.slice(0, insertion) + inject + open.slice(insertion);
+}
+
+/** Every direct host participates; inner boundaries retain their own classes. */
+function vtSsrAnnotate(html: string, attrs: Array<[string, string]>): string {
+	let index = 0;
+	return vtSsrMapTags(html, (open, depth) => {
+		if (depth !== 0) return open;
+		const suffix = index++;
+		return vtSsrInject(
+			open,
+			suffix === 0
+				? attrs
+				: attrs.map(([name, value]) => [name, name === 'vt-name' ? value + '_' + suffix : value]),
+		);
+	});
+}
+
+/** Resolve arm entry/exit and opt-in relays after the actual host hierarchy is known. */
 function vtSsrClaimArm(html: string, kind: 'enter' | 'exit'): string {
 	if (!VT_SSR_HAS_CANDIDATES) return html;
-	const start = vtSsrFirstVisibleOpenTag(html);
-	if (start === -1) return html;
-	const end = vtSsrOpenTagEnd(html, start + 1);
-	if (end === -1) return html;
-	const marker = ' vt-' + kind + '-x="';
-	const offset = html.slice(start, end).indexOf(marker);
-	if (offset === -1) return html;
-	const insertion = start + offset;
-	return html.slice(0, insertion) + ' vt-' + kind + '="' + html.slice(insertion + marker.length);
+	const active: boolean[] = [];
+	const eventName = 'vt-' + kind;
+	const parentName = 'vt-parent-' + kind;
+	return vtSsrMapTags(html, (open, depth) => {
+		const read = (name: string): string | undefined => {
+			const marker = ' ' + name + '="';
+			const start = open.indexOf(marker);
+			if (start < 0) return undefined;
+			const valueStart = start + marker.length;
+			return open.slice(valueStart, open.indexOf('"', valueStart));
+		};
+		const candidate = read(eventName + '-x');
+		if (depth === 0 && candidate !== undefined && candidate !== 'none')
+			open = open.replace(' ' + eventName + '-x="', ' ' + eventName + '="');
+		const event = read(eventName);
+		const relay = read(parentName + '-x');
+		const parentActive = depth > 0 && active[depth - 1];
+		if (parentActive && relay !== undefined && relay !== 'none' && relay !== 'auto') {
+			// The candidate is already escaped HTML; rename it without double escaping.
+			open = open.replace(' ' + parentName + '-x="', ' ' + parentName + '="');
+		}
+		active[depth] =
+			(event !== undefined && event !== 'none') ||
+			(parentActive && (relay === undefined || relay !== 'none'));
+		return open;
+	});
 }
 
-/** Strip residual (unclaimed) arm candidates before emission. */
+/** Strip staging attributes, including blocked and unclaimed relay candidates. */
 function vtSsrStrip(html: string): string {
-	// Cheap fast path — apps without ViewTransition never pay the regex.
-	if (html.indexOf(' vt-e') === -1) return html;
-	return html.replace(/ vt-(?:enter|exit)-x="[^"]*"/g, '');
+	if (html.indexOf(' vt-') === -1) return html;
+	return html.replace(/ vt-(?:(?:enter|exit)|parent-(?:enter|exit))-x="[^"]*"/g, '');
 }
 
 /**
@@ -4806,12 +4848,16 @@ function vtSsrStrip(html: string): string {
 export const ViewTransition = /* @__PURE__ */ markComponentFlags(
 	function ViewTransition(props: VtSsrProps, scope: SSRScope): string {
 		VT_SSR_HAS_CANDIDATES = true;
-		const explicit = typeof props.name === 'string';
+		const explicit = typeof props.name === 'string' && props.name !== 'auto';
 		const frame = FRAME;
 		const cand: VtSsrCandidate = {
 			name: explicit
 				? (props.name as string)
-				: '_O' + (frame !== null ? framePath(frame).replace(/\//g, '-') : '') + '_',
+				: '_O' +
+					ID_PREFIX +
+					(STREAM !== null ? STREAM.token + '-' : '') +
+					(frame !== null ? framePath(frame).replace(/\//g, '-') : '') +
+					'_',
 			share: vtSsrResolve(props, 'share'),
 			update: vtSsrResolve(props, 'update'),
 			consumed: false,
@@ -4832,7 +4878,16 @@ export const ViewTransition = /* @__PURE__ */ markComponentFlags(
 		// this boundary tops, stripped at emission when unclaimed.
 		attrs.push(['vt-enter-x', vtSsrResolve(props, 'enter')]);
 		attrs.push(['vt-exit-x', vtSsrResolve(props, 'exit')]);
-		if (named) attrs.push(['vt-share', cand.share]);
+		if (named) attrs.push(['vt-share', VT_SSR_TRY_SEQ !== seqBefore ? cand.update : cand.share]);
+		for (const kind of ['Enter', 'Exit'] as const) {
+			const prop = props[('parent' + kind) as 'parentEnter' | 'parentExit'];
+			const value =
+				prop === undefined
+					? undefined
+					: vtSsrResolve(props, ('parent' + kind) as 'parentEnter' | 'parentExit');
+			const handler = props[('onParent' + kind) as 'onParentEnter' | 'onParentExit'];
+			attrs.push(['vt-parent-' + kind.toLowerCase() + '-x', value ?? (handler ? 'auto' : 'none')]);
+		}
 		return ssrHtml(ssrBlock(vtSsrAnnotate(inner, attrs)));
 	},
 	COMPONENT_FLAG_BOUNDARY,
@@ -8679,7 +8734,7 @@ export function ssrTry(
 							? vtSsrAnnotate(inner, [
 									['vt-name', vtOuter.name],
 									['vt-update', vtOuter.update],
-									['vt-share', vtOuter.share],
+									['vt-share', vtOuter.update],
 								])
 							: inner;
 					if (SERIAL !== null) {
@@ -8866,7 +8921,7 @@ export function ssrTry(
 let STREAM_RUNTIME_JS: string | undefined;
 function streamRuntimeJs(): string {
 	return (STREAM_RUNTIME_JS ??=
-		'(function(){var d=document;var S=window.$OCTS=window.$OCTS||{};' +
+		'(function(){if(window.$OCTRC)return;var d=document;var S=window.$OCTS=window.$OCTS||{};' +
 		// Legacy `[` / `]` means one physical range; `[N` / `]N` is canonical only
 		// for safe integer N >= 2. Keep this in sync with hydrationMarkerMultiplicity.
 		'var M=function(v,c){if(v===c)return 1;if(!v||v.charAt(0)!==c)return 0;' +
@@ -8880,7 +8935,9 @@ function streamRuntimeJs(): string {
 		"=\"'+id+'\"]');" +
 		'if(!s)return;if(!t){s.remove();return;}' +
 		'var q=s.firstElementChild,z=d.createElement("template"),c=s;' +
-		'if(q&&q.localName==="script"){try{z.innerHTML=JSON.parse(q.textContent);c=z.content;}catch(e){return;}}' +
+		'if(q&&q.localName==="script"&&q.hasAttribute("' +
+		STREAM_SCRIPT_ATTR +
+		'")){try{z.innerHTML=JSON.parse(q.textContent);c=z.content;}catch(e){return;}}' +
 		'var sd=c.querySelector("script[' +
 		STREAM_SEED_ATTR +
 		']");' +
@@ -8925,6 +8982,151 @@ function streamRuntimeJs(): string {
 		'if(x)x.after(n);else if(t)t.after(n);else d.head.appendChild(n);}' +
 		'c.remove();};' +
 		'})();');
+}
+
+/**
+ * Optional streaming animation driver. The ordinary swap remains the transport
+ * authority: animation only schedules that same swap after the old snapshot.
+ * Shared document ownership also serializes reveals with hydrated client work.
+ */
+let STREAM_VIEW_TRANSITION_RUNTIME_JS: string | undefined;
+function streamViewTransitionRuntimeJs(): string {
+	return (STREAM_VIEW_TRANSITION_RUNTIME_JS ??= `(function(){
+var w=window,d=document;
+if(w.$OCTVT)return;
+w.$OCTVT=true;
+var reveal=w.$OCTRC,queue=[],waiting=null,scheduled=false;
+w.$OCTRC=function(id,nc){
+ if(typeof d.startViewTransition!=="function"){reveal(id,nc);return;}
+ queue.push([id,nc]);later();
+};
+function later(){if(queue.length&&!scheduled){scheduled=true;queueMicrotask(function(){scheduled=false;drain();});}}
+function drain(){
+ if(!queue.length)return;
+ var active=d.__octaneViewTransition;
+ if(active){
+  if(waiting!==active){waiting=active;active.finished.then(resume,resume);}
+  return;
+ }
+ function resume(){waiting=null;drain();}
+ var items=queue.splice(0),prepared=[];
+ var restore=[],changed=new Set(),committed=false,transition=null,images=null,resourceWait;
+ function commit(){
+  if(committed)return resourceWait;
+  committed=true;for(var i=0;i<items.length;i++)reveal(items[i][0],items[i][1]);
+  if(!images)return;
+  var blockers=[],cleanups=[];
+  d.documentElement.clientHeight;
+  if(d.fonts&&d.fonts.status!=="loaded")blockers.push(d.fonts.ready);
+  for(var i=0;i<images.length;i++){
+   var img=images[i],bounds=img.getBoundingClientRect();
+   if(!img.complete&&bounds.bottom>0&&bounds.right>0&&bounds.top<w.innerHeight&&bounds.left<w.innerWidth){
+    blockers.push(new Promise(function(resolve){
+     var image=img;image.addEventListener("load",resolve);image.addEventListener("error",resolve);
+     cleanups.push(function(){image.removeEventListener("load",resolve);image.removeEventListener("error",resolve);});
+    }));
+   }
+  }
+  images=null;
+  if(blockers.length)resourceWait=new Promise(function(resolve){
+   var timer=setTimeout(done,500),settled=false;
+   function done(){if(settled)return;settled=true;clearTimeout(timer);for(var i=0;i<cleanups.length;i++)cleanups[i]();cleanups.length=0;resolve();}
+   Promise.all(blockers).then(done,done);
+  });
+  return resourceWait;
+ }
+ function reset(){
+  for(var i=restore.length-1;i>=0;i--){
+   var entry=restore[i],el=entry[0],style=el.style;
+   if(style.getPropertyValue("view-transition-name")===entry[5]&&style.getPropertyPriority("view-transition-name")===entry[8]){
+    if(entry[1])style.setProperty("view-transition-name",entry[1],entry[2]);
+    else style.removeProperty("view-transition-name");
+   }
+   if(style.getPropertyValue("view-transition-class")===entry[6]&&style.getPropertyPriority("view-transition-class")===entry[9]){
+    if(entry[3])style.setProperty("view-transition-class",entry[3],entry[4]);
+    else style.removeProperty("view-transition-class");
+   }
+   if(!style.length&&!entry[7])el.removeAttribute("style");
+  }
+  restore.length=0;changed.clear();
+ }
+ function apply(el,attr){
+  var cls=el.getAttribute(attr);
+  if(!cls||cls==="none"||changed.has(el))return;
+  var style=el.style;
+  if(!style)return;
+  var name=el.getAttribute("vt-name")||("_OT_"+restore.length+"_");
+  var entry=[el,style.getPropertyValue("view-transition-name"),style.getPropertyPriority("view-transition-name"),style.getPropertyValue("view-transition-class"),style.getPropertyPriority("view-transition-class"),"","",el.hasAttribute("style")];
+  style.setProperty("view-transition-name",w.CSS.escape(name));
+  if(cls!=="auto")style.setProperty("view-transition-class",cls);
+  entry[5]=style.getPropertyValue("view-transition-name");
+  entry[6]=style.getPropertyValue("view-transition-class");
+  entry[8]=style.getPropertyPriority("view-transition-name");entry[9]=style.getPropertyPriority("view-transition-class");
+  restore.push(entry);changed.add(el);
+ }
+ function descendants(el,attr){
+  var nodes=el.querySelectorAll("["+attr+"]");
+  for(var i=0;i<nodes.length;i++)apply(nodes[i],attr);
+ }
+ try{
+  var appearing=new Map(),pendingImages=[];
+  for(var k=0;k<items.length;k++){
+   var id=items[k][0],nc=items[k][1];
+   var t=d.querySelector('template[${STREAM_BOUNDARY_ATTR}="'+id+'"]');
+   var s=d.querySelector('[${STREAM_SEGMENT_ATTR}="'+id+'"]');
+   if(!t||!s){reveal(id,nc);continue;}
+   var parent=t.parentNode,rect=parent.getBoundingClientRect();
+   if(!rect.width&&!rect.height&&!rect.left&&!rect.top){reveal(id,nc);continue;}
+   var q=s.firstElementChild;
+   if(q&&q.localName==="script"&&q.hasAttribute("${STREAM_SCRIPT_ATTR}")){
+    var parsed=d.createElement("template");parsed.innerHTML=JSON.parse(q.textContent);
+    s.replaceChildren(parsed.content);
+   }
+   var content=s;
+   if(nc){content=s.firstElementChild;while(content&&content.localName==="script")content=content.nextElementSibling;}
+   if(!content){reveal(id,nc);continue;}
+   prepared.push([t,content,parent]);
+   var matches=content.querySelectorAll("[vt-share]");
+   for(var i=0;i<matches.length;i++)if(matches[i].getAttribute("vt-share")!=="none")appearing.set(matches[i].getAttribute("vt-name"),matches[i]);
+   pendingImages.push.apply(pendingImages,content.querySelectorAll('img[src]:not([loading="lazy"])'));
+  }
+  function pair(el){
+   var other=appearing.get(el.getAttribute("vt-name"));
+   if(other&&el.getAttribute("vt-share")&&el.getAttribute("vt-share")!=="none"){
+    apply(el,"vt-share");apply(other,"vt-share");appearing.delete(el.getAttribute("vt-name"));return true;
+   }
+   return false;
+  }
+  for(var k=0;k<prepared.length;k++){
+   var t=prepared[k][0],content=prepared[k][1],parent=prepared[k][2];
+  var node=t.nextSibling,depth=1;
+  while(node){
+   if(node.nodeType===8){
+    var v=node.data,c=v.charAt(0),n=+v.slice(1),marker=v.length===1||(n>=2&&Number.isSafeInteger(n)&&String(n)===v.slice(1));
+    if(marker&&c==="[")depth++;else if(marker&&c==="]"&&!--depth)break;
+   }else if(node.nodeType===1){
+    if(!pair(node))apply(node,"vt-exit");
+    matches=node.querySelectorAll("[vt-share]");for(var j=0;j<matches.length;j++)pair(matches[j]);
+    descendants(node,"vt-parent-exit");
+   }
+   node=node.nextSibling;
+  }
+  for(var el=content.firstElementChild;el;el=el.nextElementSibling){apply(el,"vt-enter");descendants(el,"vt-parent-enter");}
+  do{
+   for(var sibling=parent.firstElementChild;sibling;sibling=sibling.nextElementSibling)apply(sibling,"vt-update");
+   parent=parent.parentNode;
+  }while(parent&&parent.nodeType===1&&parent.getAttribute("vt-update")!=="none");
+  }
+  if(!restore.length){commit();later();return;}
+  images=pendingImages;
+  transition=d.startViewTransition({update:commit,types:[]});
+  d.__octaneViewTransition=transition;
+  transition.ready.then(reset,reset);
+  function complete(){reset();if(d.__octaneViewTransition===transition)d.__octaneViewTransition=null;drain();}
+  transition.finished.then(complete,complete);
+ }catch(error){images=null;reset();if(transition&&d.__octaneViewTransition===transition)d.__octaneViewTransition=null;commit();later();}
+}
+})();`);
 }
 
 interface StreamSink {
@@ -9594,8 +9796,16 @@ async function runStream(
 	if (pass.serial.length > 0) shell += serializeSuspenseSeeds(pass.serial, nonceAttr);
 	if (pass.signals !== undefined) shell += serializeNativeSignalSeeds(pass.signals, nonceAttr);
 	const anyPending = stream.boundaries.size > 0;
+	let sentViewTransitions = pass.vtCandidates;
 	if (anyPending)
-		shell += '<script ' + STREAM_SCRIPT_ATTR + nonceAttr + '>' + streamRuntimeJs() + '</script>';
+		shell +=
+			'<script ' +
+			STREAM_SCRIPT_ATTR +
+			nonceAttr +
+			'>' +
+			streamRuntimeJs() +
+			(sentViewTransitions ? streamViewTransitionRuntimeJs() : '') +
+			'</script>';
 	try {
 		const shellWrite = write(pass.vtCandidates ? vtSsrStrip(shell) : shell);
 		if (shellWrite !== undefined) await shellWrite;
@@ -9723,6 +9933,16 @@ async function runStream(
 			// ancestor is already flushed or earlier in this same chunk. Browser script
 			// execution then introduces each child template before its `$OCTRC` call.
 			const done = reachableDoneSegments();
+			if (!sentViewTransitions && pass.vtCandidates && done.length > 0) {
+				sentViewTransitions = true;
+				chunk +=
+					'<script ' +
+					STREAM_SCRIPT_ATTR +
+					nonceAttr +
+					'>' +
+					streamViewTransitionRuntimeJs() +
+					'</script>';
+			}
 			for (const b of done) chunk += segmentChunk(b, nonceAttr);
 			if (chunk !== '') {
 				const segmentWrite = write(pass.vtCandidates ? vtSsrStrip(chunk) : chunk);

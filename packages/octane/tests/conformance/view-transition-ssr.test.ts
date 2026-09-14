@@ -1,17 +1,9 @@
 /**
- * Port of facebook/react ReactDOMFizzViewTransition-test.js (2026-07-11) —
- * the SSR side of View Transitions: the server emits resolved `vt-*`
- * annotations (vt-name / vt-update / vt-enter / vt-exit / vt-share) on each
- * boundary's first element so streamed reveals can animate pre-hydration, and
- * hydration adopts the annotated markup without complaint. 4 in-scope cases,
- * all ported (view-transitions plan Phase 5).
- *
- * Octane notes: @try/@pending is the directive form of React's <Suspense>;
- * auto names are `_O<frame-path>_` (stable across streaming passes) rather
- * than React's `_R_0_`; assertions are attribute-based, not markup-shaped.
- * The streaming harness mirrors streaming-ssr.test.ts (server-compiled
- * fixture via Function eval, chunk collector, activate() running the swap
- * scripts the way a browser would).
+ * SSR ViewTransition annotation and reveal coverage, audited against React
+ * 9b9385327857d1211fb4dc022122d897fb38bc5a. Extends the July 11 annotation
+ * ports with nested parent relays, native update ownership, resource waits,
+ * composed streams, failure cleanup, and hydration during an active capture.
+ * Real capture evidence lives in browser/view-transition-streaming.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -20,7 +12,13 @@ import { compile } from 'octane/compiler';
 import { hydrateRoot } from '../../src/index.js';
 import * as ServerRT from '../../src/server/index.js';
 // CLIENT-compiled fixture (for hydration).
-import { AnnotationsApp, ArmsApp, DualApp, OutsideApp } from './_fixtures/view-transition-ssr.tsrx';
+import {
+	AnnotationsApp,
+	ArmsApp,
+	DualApp,
+	OutsideApp,
+	RelayApp,
+} from './_fixtures/view-transition-ssr.tsrx';
 
 const FIXTURE = join(
 	process.cwd(),
@@ -76,6 +74,53 @@ const vt = (el: Element | null) => {
 	return out;
 };
 
+function mockNativeTransitions() {
+	const frames: Array<{
+		update: () => unknown;
+		ready: () => void;
+		finish: () => void;
+		skip: () => void;
+	}> = [];
+	const previous = document.startViewTransition;
+	const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+		x: 0,
+		y: 0,
+		left: 0,
+		top: 0,
+		right: 100,
+		bottom: 20,
+		width: 100,
+		height: 20,
+		toJSON() {},
+	});
+	(document as any).startViewTransition = (options: { update: () => unknown }) => {
+		let ready!: () => void, reject!: (error: unknown) => void, finish!: () => void;
+		const result = {
+			ready: new Promise<void>((resolve, rejectReady) => {
+				ready = resolve;
+				reject = rejectReady;
+			}),
+			finished: new Promise<void>((resolve) => {
+				finish = resolve;
+			}),
+			skipTransition() {
+				options.update();
+				reject(new DOMException('Skipped', 'AbortError'));
+				finish();
+			},
+		};
+		frames.push({ update: options.update, ready, finish, skip: result.skipTransition });
+		return result;
+	};
+	return {
+		frames,
+		restore() {
+			(document as any).startViewTransition = previous;
+			rect.mockRestore();
+		},
+	};
+}
+
 describe('ReactDOMFizzViewTransition (ported)', () => {
 	let container: HTMLElement;
 	let errorSpy: ReturnType<typeof vi.spyOn>;
@@ -92,6 +137,8 @@ describe('ReactDOMFizzViewTransition (ported)', () => {
 		delete (window as any).$OCTS;
 		delete (window as any).$OCTRC;
 		delete (window as any).$OCTRX;
+		delete (window as any).$OCTVT;
+		delete (document as any).__octaneViewTransition;
 	});
 
 	// Per ReactDOMFizzViewTransition-test.js:99
@@ -199,7 +246,7 @@ describe('ReactDOMFizzViewTransition (ported)', () => {
 		const shellAnnotated = shell.querySelectorAll('[vt-update]');
 		expect(shellAnnotated).toHaveLength(2);
 		const fbAttrs = vt(shellAnnotated[0])!;
-		expect(fbAttrs['vt-name']).toMatch(/^_O[\d/-]*_$/);
+		expect(fbAttrs['vt-name']).toMatch(/^_O.+_$/);
 		expect(fbAttrs['vt-update']).toBe('auto');
 		expect(fbAttrs['vt-share']).toBe('auto');
 		expect(fbAttrs['vt-enter']).toBeUndefined();
@@ -226,4 +273,385 @@ describe('ReactDOMFizzViewTransition (ported)', () => {
 		root.unmount();
 		container.innerHTML = '';
 	});
+	// ReactDOMFizzViewTransition: nested parentEnter/parentExit streaming relays.
+	it.each([
+		{ relay: 'relay', handler: undefined, deep: true, own: 'relay' },
+		{
+			relay: { default: 'relay', navigation: 'other' },
+			handler: undefined,
+			deep: true,
+			own: 'relay',
+		},
+		{ relay: 'none', handler: undefined, deep: false, own: null },
+		{ relay: undefined, handler: undefined, deep: false, own: null },
+		{ relay: 'auto', handler: undefined, deep: true, own: null },
+		{ relay: undefined, handler: () => {}, deep: true, own: null },
+	])(
+		'preserves nested stream relay opt-in $relay / $deep',
+		async ({ relay, handler, deep, own }) => {
+			const d = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.RelayApp, { promise: d.promise, relay, handler }).pipe(
+				c.dest,
+			);
+			container.innerHTML = c.chunks[0];
+			expect(container.querySelector('#fallback-relay')!.getAttribute('vt-parent-exit')).toBe(own);
+			expect(container.querySelector('#fallback-deep')!.getAttribute('vt-parent-exit')).toBe(
+				deep ? 'deep-exit' : null,
+			);
+			d.resolve('Content');
+			await c.ended;
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			await Promise.resolve();
+			expect(container.querySelector('#relay')!.getAttribute('vt-parent-enter')).toBe(own);
+			expect(container.querySelector('#deep')!.getAttribute('vt-parent-enter')).toBe(
+				deep ? 'deep-enter' : null,
+			);
+		},
+	);
+
+	it('annotates each host and reserves auto for generated names', () => {
+		container.innerHTML = ServerRT.renderToString(server.MultipleHostsApp, {}).html;
+		const first = container.querySelector('#first')!;
+		const second = container.querySelector('#second')!;
+		expect(first.getAttribute('vt-update')).toBe('resize');
+		expect(second.getAttribute('vt-update')).toBe('resize');
+		expect(second.getAttribute('vt-name')).toBeTruthy();
+		expect(second.getAttribute('vt-name')).not.toBe(first.getAttribute('vt-name'));
+		expect(container.querySelector('#automatic')!.getAttribute('vt-name')).toBeNull();
+	});
+
+	it('uses the wrapping update class when Suspense replaces fallback content', async () => {
+		const d = deferred<string>();
+		const c = collector();
+		ServerRT.renderToPipeableStream(server.OutsideClassesApp, { promise: d.promise }).pipe(c.dest);
+		container.innerHTML = c.chunks[0];
+		expect(container.querySelector('[vt-name="outer-classes"]')!.getAttribute('vt-share')).toBe(
+			'resize',
+		);
+		d.resolve('Content');
+		await c.ended;
+		container.innerHTML = c.chunks.join('');
+		activate(container);
+		expect(container.querySelector('[vt-name="outer-classes"]')!.getAttribute('vt-share')).toBe(
+			'resize',
+		);
+	});
+
+	it('captures streamed fallback and nested content inside the native update callback', async () => {
+		const previous = document.startViewTransition;
+		const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+			x: 0,
+			y: 0,
+			left: 0,
+			top: 0,
+			right: 100,
+			bottom: 20,
+			width: 100,
+			height: 20,
+			toJSON() {},
+		});
+		const captured: Record<string, string>[] = [];
+		let update!: () => void;
+		let ready!: () => void;
+		let finished!: () => void;
+		(document as any).startViewTransition = (options: { update: () => void }) => {
+			captured.push(
+				Object.fromEntries(
+					Array.from(container.querySelectorAll<HTMLElement>('[id]'))
+						.filter((el) => !el.closest('[hidden]'))
+						.map((el) => [el.id, el.style.viewTransitionClass]),
+				),
+			);
+			update = options.update;
+			return {
+				ready: new Promise<void>((r) => {
+					ready = r;
+				}),
+				finished: new Promise<void>((r) => {
+					finished = r;
+				}),
+				skipTransition() {
+					update();
+					ready();
+					finished();
+				},
+			};
+		};
+		try {
+			const d = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.RelayApp, { promise: d.promise, relay: 'relay' }).pipe(
+				c.dest,
+			);
+			d.resolve('Content');
+			await c.ended;
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(captured).toEqual([
+				{ fallback: 'page-exit', 'fallback-relay': 'relay', 'fallback-deep': 'deep-exit' },
+			]);
+			expect(container.querySelector('#fallback')).not.toBeNull();
+			update();
+			expect(container.querySelector('#fallback')).toBeNull();
+			expect(container.querySelector<HTMLElement>('#content')!.style.viewTransitionClass).toBe(
+				'page-enter',
+			);
+			expect(container.querySelector<HTMLElement>('#deep')!.style.viewTransitionClass).toBe(
+				'deep-enter',
+			);
+			const content = container.querySelector('#content');
+			const hydrated = hydrateRoot(container, RelayApp, { promise: d.promise, relay: 'relay' });
+			expect(container.querySelector('#content')).toBe(content);
+			ready();
+			await Promise.resolve();
+			expect(container.querySelector<HTMLElement>('#content')!.style.viewTransitionName).toBe('');
+			expect(container.querySelector<HTMLElement>('#deep')!.style.viewTransitionClass).toBe('');
+			finished();
+			await Promise.resolve();
+			hydrated.unmount();
+		} finally {
+			(document as any).startViewTransition = previous;
+			rect.mockRestore();
+		}
+	});
+	it('queues independently composed streams and releases the next reveal after a skip', async () => {
+		const native = mockNativeTransitions();
+		try {
+			for (const id of ['one', 'two', 'removed']) {
+				const d = deferred<string>();
+				const c = collector();
+				ServerRT.renderToPipeableStream(server.StreamTextApp, { promise: d.promise, id }).pipe(
+					c.dest,
+				);
+				d.resolve(id);
+				await c.ended;
+				const host = document.createElement('div');
+				host.innerHTML = c.chunks.join('');
+				container.appendChild(host);
+				activate(host);
+				if (id === 'removed') host.remove();
+			}
+			expect(native.frames).toHaveLength(1);
+			native.frames[0].skip();
+			await Promise.resolve();
+			expect(container.querySelector('#one')!.textContent).toBe('one');
+			expect(native.frames).toHaveLength(2);
+			native.frames[1].update();
+			native.frames[1].ready();
+			native.frames[1].finish();
+			await Promise.resolve();
+			expect(container.querySelector('#two')!.textContent).toBe('two');
+			expect(container.querySelectorAll('p')).toHaveLength(0);
+		} finally {
+			native.restore();
+		}
+	});
+
+	it('shares one capture across sibling boundaries completed in the same stream wave', async () => {
+		const native = mockNativeTransitions();
+		try {
+			const d = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.SharedWaveApp, { promise: d.promise }).pipe(c.dest);
+			d.resolve('Content');
+			await c.ended;
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			await Promise.resolve();
+			expect(native.frames).toHaveLength(1);
+			const old = container.querySelector<HTMLElement>('#wave-old')!;
+			expect(old.style.viewTransitionName).toBe('wave-hero');
+			expect(old.style.viewTransitionClass).toBe('old-share');
+			native.frames[0].update();
+			const next = container.querySelector<HTMLElement>('#wave-new')!;
+			expect(next.closest('[hidden]')).toBeNull();
+			expect(next.style.viewTransitionName).toBe(old.style.viewTransitionName);
+			expect(next.style.viewTransitionClass).toBe('new-share');
+			expect(container.querySelector('p')).toBeNull();
+			native.frames[0].ready();
+			native.frames[0].finish();
+			await Promise.resolve();
+			expect(native.frames).toHaveLength(1);
+		} finally {
+			native.restore();
+		}
+	});
+
+	it('installs the animation driver when the first ViewTransition arrives in a later wave', async () => {
+		const native = mockNativeTransitions();
+		try {
+			const d = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.LateViewApp, { promise: d.promise }).pipe(c.dest);
+			expect(c.chunks.join('')).not.toContain('$OCTVT');
+			d.resolve('Content');
+			await c.ended;
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			await Promise.resolve();
+			expect(native.frames).toHaveLength(1);
+			native.frames[0].update();
+			const content = container.querySelector<HTMLElement>('#late-content')!;
+			expect(content.closest('[hidden]')).toBeNull();
+			expect(content.style.viewTransitionClass).toBe('late-enter');
+			native.frames[0].ready();
+			native.frames[0].finish();
+			await Promise.resolve();
+		} finally {
+			native.restore();
+		}
+	});
+
+	it('reveals content and restores authored styles when native capture fails', async () => {
+		const native = mockNativeTransitions();
+		(document as any).startViewTransition = () => {
+			throw new Error('Capture unavailable');
+		};
+		try {
+			const d = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.StreamTextApp, {
+				promise: d.promise,
+				id: 'styled',
+				styled: true,
+			}).pipe(c.dest);
+			d.resolve('Content');
+			await c.ended;
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			await Promise.resolve();
+			const el = container.querySelector<HTMLElement>('#styled')!;
+			expect(el.textContent).toBe('Content');
+			expect(el.style.viewTransitionName).toBe('authored');
+			expect(el.style.viewTransitionClass).toBe('authored-class');
+			expect(el.style.color).toBe('red');
+			expect(container.querySelector('p')).toBeNull();
+		} finally {
+			native.restore();
+		}
+	});
+
+	it('preserves author changes to animation classes while restoring temporary names', async () => {
+		const native = mockNativeTransitions();
+		try {
+			const d = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.StreamTextApp, {
+				promise: d.promise,
+				id: 'styled',
+				styled: true,
+			}).pipe(c.dest);
+			d.resolve('Content');
+			await c.ended;
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			await Promise.resolve();
+			native.frames[0].update();
+			const el = container.querySelector<HTMLElement>('#styled')!;
+			el.style.setProperty('view-transition-class', 'consumer-change', 'important');
+			native.frames[0].ready();
+			await Promise.resolve();
+			expect(el.style.viewTransitionName).toBe('authored');
+			expect(el.style.viewTransitionClass).toBe('consumer-change');
+			expect(el.style.getPropertyPriority('view-transition-class')).toBe('important');
+			native.frames[0].finish();
+			await Promise.resolve();
+		} finally {
+			native.restore();
+		}
+	});
+
+	it('waits for visible eager images and fonts before finishing the reveal update', async () => {
+		const native = mockNativeTransitions();
+		const font = deferred<void>();
+		const previousFonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+		Object.defineProperty(document, 'fonts', {
+			configurable: true,
+			value: { status: 'loading', ready: font.promise },
+		});
+		const complete = vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(false);
+		try {
+			const d = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.StreamResourceApp, { promise: d.promise }).pipe(
+				c.dest,
+			);
+			d.resolve('Content');
+			await c.ended;
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			await Promise.resolve();
+			let settled = false;
+			const updating = Promise.resolve(native.frames[0].update()).then(() => {
+				settled = true;
+			});
+			await Promise.resolve();
+			expect(settled).toBe(false);
+			font.resolve();
+			await Promise.resolve();
+			expect(settled).toBe(false);
+			container.querySelector('#stream-eager')!.dispatchEvent(new Event('load'));
+			await updating;
+			expect(settled).toBe(true);
+			native.frames[0].ready();
+			native.frames[0].finish();
+			await Promise.resolve();
+		} finally {
+			complete.mockRestore();
+			if (previousFonts) Object.defineProperty(document, 'fonts', previousFonts);
+			else delete (document as any).fonts;
+			native.restore();
+		}
+	});
+
+	it.each(['error', 'timeout'] as const)(
+		'releases a stalled reveal on image %s',
+		async (outcome) => {
+			const native = mockNativeTransitions();
+			const complete = vi
+				.spyOn(HTMLImageElement.prototype, 'complete', 'get')
+				.mockReturnValue(false);
+			try {
+				const d = deferred<string>();
+				const c = collector();
+				ServerRT.renderToPipeableStream(server.StreamResourceApp, { promise: d.promise }).pipe(
+					c.dest,
+				);
+				d.resolve('Content');
+				await c.ended;
+				vi.useFakeTimers();
+				container.innerHTML = c.chunks.join('');
+				activate(container);
+				await Promise.resolve();
+				const image = container.querySelector<HTMLImageElement>('#stream-eager')!;
+				const remove = vi.spyOn(image, 'removeEventListener');
+				let settled = false;
+				const updating = Promise.resolve(native.frames[0].update()).then(() => {
+					settled = true;
+				});
+				await Promise.resolve();
+				expect(settled).toBe(false);
+				if (outcome === 'error') image.dispatchEvent(new Event('error'));
+				else {
+					await vi.advanceTimersByTimeAsync(499);
+					expect(settled).toBe(false);
+					await vi.advanceTimersByTimeAsync(1);
+				}
+				await updating;
+				expect(settled).toBe(true);
+				expect(remove.mock.calls.map((call) => call[0])).toEqual(['load', 'error']);
+				native.frames[0].ready();
+				native.frames[0].finish();
+				await Promise.resolve();
+			} finally {
+				vi.useRealTimers();
+				complete.mockRestore();
+				native.restore();
+			}
+		},
+	);
 });

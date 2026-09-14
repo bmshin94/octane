@@ -720,6 +720,14 @@ const SUITES = [
 		],
 	},
 	{
+		// Optional View Transition bundle reachability and native capture work.
+		name: 'view-transitions',
+		cwd: 'view-transitions',
+		servers: [],
+		iter: { normal: 1, quick: 1 },
+		runs: [{ script: 'bundle.mjs', args: () => [] }],
+	},
+	{
 		// Raw streaming API over REAL HTTP, cold and warm: fresh-process import
 		// cost, spawn→listen→first-byte cold TTFB, and warm shell/total/throughput
 		// for octane renderToPipeableStream vs React Fizz behind one identical

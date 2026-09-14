@@ -107,3 +107,157 @@ export function OutsideApp(props) @{
 		</ViewTransition>
 	</div>
 }
+
+export function RelayContent(props) @{
+	const text = use(props.promise) as string;
+	<div id="content">
+		<ViewTransition parentEnter={props.relay} onParentEnter={props.handler}>
+			<div id="relay">
+				<ViewTransition parentEnter="deep-enter">
+					<span id="deep">{text}</span>
+				</ViewTransition>
+			</div>
+		</ViewTransition>
+	</div>
+}
+
+export function RelayApp(props) @{
+	<div>
+		<>
+			@try {
+				<ViewTransition enter="page-enter">
+					<RelayContent promise={props.promise} relay={props.relay} handler={props.handler} />
+				</ViewTransition>
+			} @pending {
+				<ViewTransition exit="page-exit">
+					<div id="fallback">
+						<ViewTransition parentExit={props.relay} onParentExit={props.handler}>
+							<div id="fallback-relay">
+								<ViewTransition parentExit="deep-exit">
+									<span id="fallback-deep">{'Loading'}</span>
+								</ViewTransition>
+							</div>
+						</ViewTransition>
+					</div>
+				</ViewTransition>
+			}
+		</>
+	</div>
+}
+
+export function MultipleHostsApp(props) @{
+	<div>
+		<ViewTransition name="siblings" update="resize">
+			<>
+				<div id="first">{'One'}</div>
+				<div id="second">{'Two'}</div>
+			</>
+		</ViewTransition>
+		<ViewTransition name="auto">
+			<span id="automatic">{'Auto'}</span>
+		</ViewTransition>
+	</div>
+}
+
+export function OutsideClassesApp(props) @{
+	<div>
+		<ViewTransition name="outer-classes" update="resize" share="shared">
+			<>
+				@try {
+					<ArmsContent promise={props.promise} />
+				} @pending {
+					<div>{'Loading'}</div>
+				}
+			</>
+		</ViewTransition>
+	</div>
+}
+
+export function StreamTextContent(props) @{
+	const text = use(props.promise) as string;
+	<div
+		id={props.id}
+		style={props.styled
+			? { viewTransitionName: 'authored', viewTransitionClass: 'authored-class', color: 'red' }
+			: undefined}
+	>{text}</div>
+}
+
+export function StreamTextApp(props) @{
+	<section>
+		<>
+			@try {
+				<ViewTransition enter="stream-enter">
+					<StreamTextContent promise={props.promise} id={props.id} styled={props.styled} />
+				</ViewTransition>
+			} @pending {
+				<ViewTransition exit="stream-exit">
+					<p>{'Loading ' + props.id}</p>
+				</ViewTransition>
+			}
+		</>
+	</section>
+}
+
+export function StreamResourceContent(props) @{
+	const text = use(props.promise) as string;
+	<div>
+		<span>{text}</span>
+		<img id="stream-eager" src="/view-transition-test-eager.png" />
+		<img id="stream-lazy" src="/view-transition-test-lazy.png" loading="lazy" />
+	</div>
+}
+
+export function StreamResourceApp(props) @{
+	<section>
+		<>
+			@try {
+				<ViewTransition>
+					<StreamResourceContent promise={props.promise} />
+				</ViewTransition>
+			} @pending {
+				<ViewTransition>
+					<p>{'Loading'}</p>
+				</ViewTransition>
+			}
+		</>
+	</section>
+}
+
+export function SharedWaveApp(props) @{
+	<section>
+		<>
+			@try {
+				<StreamTextContent promise={props.promise} id="wave-first" />
+			} @pending {
+				<ViewTransition name="wave-hero" share="old-share">
+					<div id="wave-old">{'Loading first'}</div>
+				</ViewTransition>
+			}
+			@try {
+				<ViewTransition name="wave-hero" share="new-share">
+					<StreamTextContent promise={props.promise} id="wave-new" />
+				</ViewTransition>
+			} @pending {
+				<p>{'Loading second'}</p>
+			}
+		</>
+	</section>
+}
+
+function LateViewContent(props) @{
+	const text = use(props.promise) as string;
+	<ViewTransition enter="late-enter">
+		<div id="late-content">{text}</div>
+	</ViewTransition>
+}
+
+export function LateViewApp(props) @{
+	<section>
+		@try {
+			<LateViewContent promise={props.promise} />
+		} @pending {
+			<p>{'Loading'}</p>
+		}
+	</section>
+}
