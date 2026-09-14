@@ -27,8 +27,9 @@ startTransition(() => setOpen(true));
 
 A boundary only activates on **transition-lane** commits — updates inside
 `startTransition`, `useDeferredValue` re-renders, and Suspense reveals
-(fallback → content). Urgent updates, discrete events, and `flushSync` never
-animate (they skip an in-flight transition, matching React). Without browser
+(fallback → content). Urgent updates and `flushSync` never animate. An urgent
+update skips active transitions it touches; `flushSync` skips all active scopes.
+Event handlers can opt updates into animation with `startTransition`. Without browser
 support for the native options overload (`document.startViewTransition({ update, types })`), updates commit
 with no animation — the API is a progressive enhancement.
 
@@ -79,6 +80,52 @@ name. Use explicit names for shared-element pairs. Multiple top-level elements
 get suffixed names and are all measured. Temporary names and classes are
 restored to their authored values after capture.
 
+## Element scopes
+
+`scope="element"` is an Octane extension for native
+[element-scoped transitions](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API/Using_element-scoped):
+
+```tsrx
+<ViewTransition scope="element">
+	<section class="panel">
+		<ViewTransition name="content" update="fade">
+			<p>{text as string}</p>
+		</ViewTransition>
+	</section>
+</ViewTransition>
+```
+
+The declaration must contain exactly one persistent direct host, with no visible
+text siblings. Octane adds no wrapper. Descendant boundaries inherit the nearest
+scope; omitted scopes otherwise use the document. Portals outside a declared
+host do not animate in that scope. Newly mounted, removed, replaced, or invalid
+scope hosts commit normally without a document animation fallback.
+
+Names and shared-element matching are local to each scope, so separate panels
+can both use `name="content"`. Sibling scopes can animate independently, and a
+nested scope can begin after its ancestor finishes capture while the ancestor's
+animation continues. Updates to an ancestor that might remove an active child
+scope wait for that child. `flushSync` interrupts all active scopes; ordinary
+urgent work interrupts the scopes it touches.
+
+The scope host retains native self-participation and clipping. Its default name
+is `root`; authored `view-transition-name` overrides that default, and an explicit
+boundary `name` takes precedence during capture. Authored `view-transition-name:
+none` excludes the host's own group and callback, while named descendants can
+still animate. Octane owns `view-transition-scope: all !important` for the
+declaration's lifetime and restores the authored property when the declaration
+is removed.
+
+Pseudo-element handles address the scope host. Outside controls stay interactive.
+Several scopes participating in one update share one DOM publication and one
+layout phase; callbacks and their cleanup follow each native scope's lifetime.
+
+Element transitions are a progressive enhancement, detected through
+`Element.startViewTransition`. Browsers without it commit the scoped update
+without animation. Document transitions keep their existing support requirements;
+the framework's minimum browser version is unchanged. Native scope coverage runs
+in Chromium 149 without feature flags.
+
 ## Callbacks
 
 `onEnter` / `onExit` / `onUpdate` / `onShare` / `onParentEnter` /
@@ -92,6 +139,10 @@ restored to their authored values after capture.
 Each pseudo-element handle supports `animate()`, `getAnimations()`, and
 `getComputedStyle()`. A boundary's `ref` receives the same stable instance;
 object refs and callback refs, including callback cleanup, follow layout lifetime.
+For an unnamed element scope, that stable ref follows the host's committed CSS
+name, including updates made by a child. Its pseudo-element properties resolve
+the current name; a pseudo-element handle already read keeps its original name
+and host target. Explicit names and document boundaries retain fixed instances.
 
 ## SSR
 
@@ -99,7 +150,23 @@ Server rendering annotates each top-level host in a boundary. The optional
 streaming driver consumes those annotations to animate Suspense fallback/content
 replacements before hydration, including shared elements and parent relays.
 Hydration adopts the existing hosts. Server reveals and client commits coordinate
-through one native transition per document.
+through the native handle for their document or element scope.
+
+`scope="element"` also works before hydration. Its one persistent direct host
+receives `view-transition-scope: all !important`; nested streamed replacements
+use that element's native transition. Sibling scopes may animate independently,
+and nested scopes keep their names and captures separate. A reveal waits for an
+earlier animation on the same scope, while an independent scope can proceed.
+If a batch includes document and element captures, all capture callbacks publish
+the streamed replacements together.
+
+Keep the scope host outside the Suspense boundary whose fallback will be
+replaced. Missing or multiple hosts, direct visible text beside the host, and a
+replaceable fallback host skip animation. Browsers without element transition
+support also reveal scoped content without animation. These cases do not widen
+the capture to the document. Hydration preserves the host and adopts the scope
+style; removing the scope restores its authored scope property without reverting
+unrelated style changes.
 
 ## Commit ordering
 
@@ -123,8 +190,9 @@ otherwise they are logged, and the update still commits.
 
 - `prefers-reduced-motion` is not handled automatically (React parity) — gate
   your transition CSS with a media query.
-- One transition runs at a time; work arriving mid-animation batches into the
-  next one (A→B, then B→D).
+- One transition runs at a time **per scope**; work for a busy scope batches into
+  its next animation (A→B, then B→D). A batch that touches several scopes waits
+  for all of them, then publishes one DOM commit.
 - Gesture transitions (`useSwipeTransition` /
   `unstable_startGestureTransition`) are not implemented — they are still
   experimental in React and explicitly deferred until React stabilizes them.

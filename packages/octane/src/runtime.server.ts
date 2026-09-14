@@ -4669,6 +4669,7 @@ export const Suspense = /* @__PURE__ */ markComponentFlags(
 type VtSsrClassValue = string | Record<string, string>;
 interface VtSsrProps {
 	name?: string;
+	scope?: 'element';
 	enter?: VtSsrClassValue;
 	exit?: VtSsrClassValue;
 	update?: VtSsrClassValue;
@@ -4682,6 +4683,7 @@ interface VtSsrProps {
 }
 interface VtSsrCandidate {
 	name: string;
+	elementScope: boolean;
 	share: string;
 	update: string;
 	consumed: boolean;
@@ -4723,13 +4725,19 @@ function vtSsrOpenTagEnd(html: string, from: number): number {
 }
 
 /** Walk rendered opening tags without interpreting quoted attributes or raw text as markup. */
-function vtSsrMapTags(html: string, visit: (open: string, depth: number) => string): string {
+function vtSsrMapTags(
+	html: string,
+	visit: (open: string, depth: number, tag: string) => string,
+	visitText?: (text: string, depth: number) => void,
+	visitAllElements = false,
+): string {
 	let depth = 0;
 	let from = 0;
 	let copied = 0;
 	let out = '';
 	while (from < html.length) {
 		const start = html.indexOf('<', from);
+		if (visitText) visitText(html.slice(from, start < 0 ? html.length : start), depth);
 		if (start < 0) break;
 		if (html.startsWith('<!--', start)) {
 			const end = html.indexOf('-->', start + 4);
@@ -4754,20 +4762,25 @@ function vtSsrMapTags(html: string, visit: (open: string, depth: number) => stri
 			depth = Math.max(0, depth - 1);
 			continue;
 		}
-		// Resource tags are not visual hosts. Templates hold inert transport markup.
-		if (tag === 'template' || tag === 'script' || tag === 'style' || tag === 'title') {
-			const close = html.indexOf('</' + tag + '>', from);
-			if (close >= 0) from = close + tag.length + 3;
-			continue;
-		}
+		const inert = tag === 'template' || tag === 'script' || tag === 'style' || tag === 'title';
 		const isVoid = VOID_ELEMENTS.has(tag) || html[end - 1] === '/';
-		if (tag !== 'link' && tag !== 'meta' && tag !== 'base' && tag !== 'option') {
+		if (
+			visitAllElements ||
+			(!inert && tag !== 'link' && tag !== 'meta' && tag !== 'base' && tag !== 'option')
+		) {
 			const open = html.slice(start, end + 1);
-			const next = visit(open, depth);
+			const next = visit(open, depth, tag);
 			if (next !== open) {
 				out += html.slice(copied, start) + next;
 				copied = end + 1;
 			}
+		}
+		// Resource tags are not visual hosts. Templates hold inert transport markup;
+		// scope validation alone visits every direct element, including stream sentinels.
+		if (inert) {
+			const close = html.indexOf('</' + tag + '>', from);
+			if (close >= 0) from = close + tag.length + 3;
+			continue;
 		}
 		if (!isVoid) depth++;
 	}
@@ -4798,6 +4811,86 @@ function vtSsrAnnotate(html: string, attrs: Array<[string, string]>): string {
 				: attrs.map(([name, value]) => [name, name === 'vt-name' ? value + '_' + suffix : value]),
 		);
 	});
+}
+
+/** Read an actual attribute, skipping quoted text in other attribute values. */
+function vtSsrAttribute(
+	open: string,
+	wanted: string,
+): { start: number; end: number; quote: string } | null {
+	let i = 1;
+	while (i < open.length && !/[\s/>]/.test(open[i])) i++;
+	while (i < open.length) {
+		while (/\s/.test(open[i] ?? '')) i++;
+		if (i >= open.length || open[i] === '>' || open[i] === '/') break;
+		const start = i;
+		while (i < open.length && !/[\s=/>]/.test(open[i])) i++;
+		const name = open.slice(start, i).toLowerCase();
+		while (/\s/.test(open[i] ?? '')) i++;
+		if (open[i] !== '=') continue;
+		i++;
+		while (/\s/.test(open[i] ?? '')) i++;
+		const quote = open[i] === '"' || open[i] === "'" ? open[i++] : '';
+		const valueStart = i;
+		while (i < open.length && (quote ? open[i] !== quote : !/[\s>]/.test(open[i]))) i++;
+		const valueEnd = i;
+		if (quote) i++;
+		if (name === wanted) return { start: valueStart, end: valueEnd, quote };
+	}
+	return null;
+}
+
+/** A scope owns one host that contains, rather than replaces, streamed boundaries. */
+function vtSsrAnnotateScope(html: string): string {
+	let roots = 0;
+	let sentinel = false;
+	let text = false;
+	vtSsrMapTags(
+		html,
+		(open, depth, tag) => {
+			if (depth === 0) {
+				if (tag === 'template' && vtSsrAttribute(open, STREAM_BOUNDARY_ATTR) !== null)
+					sentinel = true;
+				else roots++;
+			}
+			return open;
+		},
+		(value, depth) => {
+			if (depth === 0 && /\S/.test(value)) text = true;
+		},
+		true,
+	);
+	const valid = roots === 1 && !sentinel && !text;
+	return vtSsrMapTags(
+		html,
+		(open, depth, tag) => {
+			if (depth !== 0 || vtSsrAttribute(open, 'vt-scope') !== null) return open;
+			open = vtSsrInject(open, [['vt-scope', valid ? 'element' : 'none']]);
+			if (!valid) return open;
+			const style = vtSsrAttribute(open, 'style');
+			if (style === null)
+				return vtSsrInject(open, [
+					['vt-scope-style', ''],
+					['style', 'view-transition-scope:all!important'],
+				]);
+			// Reuse the attribute's original quoting/escaping, preserving the author's
+			// CSS exactly for hydration to recover only the owned scope property.
+			const authored = open.slice(style.start, style.end);
+			const quote = style.quote || '"';
+			const saved = ' vt-scope-style=' + quote + authored + quote + ' vt-scope-had-style=""';
+			const next =
+				open.slice(0, style.start) +
+				(style.quote ? '' : '"') +
+				authored +
+				';view-transition-scope:all!important' +
+				(style.quote ? '' : '"') +
+				open.slice(style.end);
+			const insertion = next[next.length - 2] === '/' ? next.length - 2 : next.length - 1;
+			return next.slice(0, insertion) + saved + next.slice(insertion);
+		},
+		undefined,
+		true,
+	);
 }
 
 /** Resolve arm entry/exit and opt-in relays after the actual host hierarchy is known. */
@@ -4851,6 +4944,7 @@ export const ViewTransition = /* @__PURE__ */ markComponentFlags(
 		const explicit = typeof props.name === 'string' && props.name !== 'auto';
 		const frame = FRAME;
 		const cand: VtSsrCandidate = {
+			elementScope: props.scope === 'element',
 			name: explicit
 				? (props.name as string)
 				: '_O' +
@@ -4870,7 +4964,7 @@ export const ViewTransition = /* @__PURE__ */ markComponentFlags(
 		} finally {
 			VT_SSR_STACK.pop();
 		}
-		const named = explicit || VT_SSR_TRY_SEQ !== seqBefore;
+		const named = explicit || (props.scope !== 'element' && VT_SSR_TRY_SEQ !== seqBefore);
 		const attrs: Array<[string, string]> = [];
 		if (named) attrs.push(['vt-name', cand.name]);
 		attrs.push(['vt-update', cand.update]);
@@ -4888,7 +4982,8 @@ export const ViewTransition = /* @__PURE__ */ markComponentFlags(
 			const handler = props[('onParent' + kind) as 'onParentEnter' | 'onParentExit'];
 			attrs.push(['vt-parent-' + kind.toLowerCase() + '-x', value ?? (handler ? 'auto' : 'none')]);
 		}
-		return ssrHtml(ssrBlock(vtSsrAnnotate(inner, attrs)));
+		const annotated = vtSsrAnnotate(inner, attrs);
+		return ssrHtml(ssrBlock(props.scope === 'element' ? vtSsrAnnotateScope(annotated) : annotated));
 	},
 	COMPONENT_FLAG_BOUNDARY,
 	'ViewTransition',
@@ -8474,7 +8569,7 @@ export function ssrTry(
 	let vtOuter: VtSsrCandidate | null = null;
 	if (VT_SSR_STACK.length > 0) {
 		const top = VT_SSR_STACK[VT_SSR_STACK.length - 1];
-		if (!top.consumed) {
+		if (!top.consumed && !top.elementScope) {
 			top.consumed = true;
 			vtOuter = top;
 		}
@@ -8987,7 +9082,12 @@ function streamRuntimeJs(): string {
 /**
  * Optional streaming animation driver. The ordinary swap remains the transport
  * authority: animation only schedules that same swap after the old snapshot.
- * Shared document ownership also serializes reveals with hydrated client work.
+ * Native handles are shared with hydration per document or persistent element
+ * owner. Siblings can overlap, while a containing capture waits for its active
+ * children. A new child waits only for its ancestor's old snapshot to complete.
+ * A batch enters every element callback before starting a document capture;
+ * otherwise the document's rendering freeze can prevent those callbacks from
+ * entering. All participating callbacks then publish the same swap plan once.
  */
 let STREAM_VIEW_TRANSITION_RUNTIME_JS: string | undefined;
 function streamViewTransitionRuntimeJs(): string {
@@ -8995,26 +9095,51 @@ function streamViewTransitionRuntimeJs(): string {
 var w=window,d=document;
 if(w.$OCTVT)return;
 w.$OCTVT=true;
-var reveal=w.$OCTRC,queue=[],waiting=null,scheduled=false;
+var reveal=w.$OCTRC,queue=[],scheduled=false,ready=new WeakSet(),waitReady=new WeakSet(),waitFinish=new WeakSet();
 w.$OCTRC=function(id,nc){
- if(typeof d.startViewTransition!=="function"){reveal(id,nc);return;}
+ if(typeof d.startViewTransition!=="function"&&typeof Element.prototype.startViewTransition!=="function"){reveal(id,nc);return;}
  queue.push([id,nc]);later();
 };
 function later(){if(queue.length&&!scheduled){scheduled=true;queueMicrotask(function(){scheduled=false;drain();});}}
+function watch(handle,untilReady){
+ var watched=untilReady?waitReady:waitFinish;
+ if(watched.has(handle))return;
+ watched.add(handle);
+ if(untilReady)handle.ready.then(function(){ready.add(handle);later();},function(){watch(handle,false);});
+ else handle.finished.then(later,later);
+}
+function ownerOf(t){
+ var scope=t.closest("[vt-scope]");
+ return scope?(scope.getAttribute("vt-scope")==="element"?scope:null):d;
+}
+function blocked(owner){
+ var handle=d.__octaneViewTransition,blocked=false;
+ if(handle&&!(owner&&owner!==d&&ready.has(handle))){watch(handle,!!owner&&owner!==d);blocked=true;}
+ var scopes=d.__octaneViewTransitionScopes;
+ if(scopes)scopes.forEach(function(active,element){
+  if(!owner||owner===d||owner===element||owner.contains(element)){watch(active,false);blocked=true;}
+  else if(element.contains(owner)&&!ready.has(active)){watch(active,true);blocked=true;}
+ });
+ return blocked;
+}
 function drain(){
  if(!queue.length)return;
- var active=d.__octaneViewTransition;
- if(active){
-  if(waiting!==active){waiting=active;active.finished.then(resume,resume);}
-  return;
+ var selected=[],pending=[],groups=[],owners=new Map();
+ for(var i=0;i<queue.length;i++){
+  var item=queue[i],t=d.querySelector('template[${STREAM_BOUNDARY_ATTR}="'+item[0]+'"]'),owner=t?ownerOf(t):null;
+  if(blocked(owner)){pending.push(item);continue;}
+  selected.push(item);
+  var group=owners.get(owner);
+  if(!group){group={owner:owner,items:[],restore:[],changed:new Set(),prepared:[],arrived:false};owners.set(owner,group);groups.push(group);}
+  group.items.push(item);
  }
- function resume(){waiting=null;drain();}
- var items=queue.splice(0),prepared=[];
- var restore=[],changed=new Set(),committed=false,transition=null,images=null,resourceWait;
+ queue=pending;
+ if(!selected.length)return;
+ var committed=false,animated=false,images=[],resourceWait;
  function commit(){
   if(committed)return resourceWait;
-  committed=true;for(var i=0;i<items.length;i++)reveal(items[i][0],items[i][1]);
-  if(!images)return;
+  committed=true;for(var i=0;i<selected.length;i++)reveal(selected[i][0],selected[i][1]);
+  if(!animated)return;
   var blockers=[],cleanups=[];
   d.documentElement.clientHeight;
   if(d.fonts&&d.fonts.status!=="loaded")blockers.push(d.fonts.ready);
@@ -9027,7 +9152,7 @@ function drain(){
     }));
    }
   }
-  images=null;
+  images.length=0;
   if(blockers.length)resourceWait=new Promise(function(resolve){
    var timer=setTimeout(done,500),settled=false;
    function done(){if(settled)return;settled=true;clearTimeout(timer);for(var i=0;i<cleanups.length;i++)cleanups[i]();cleanups.length=0;resolve();}
@@ -9035,7 +9160,8 @@ function drain(){
   });
   return resourceWait;
  }
- function reset(){
+ function reset(group){
+  var restore=group.restore;
   for(var i=restore.length-1;i>=0;i--){
    var entry=restore[i],el=entry[0],style=el.style;
    if(style.getPropertyValue("view-transition-name")===entry[5]&&style.getPropertyPriority("view-transition-name")===entry[8]){
@@ -9048,83 +9174,122 @@ function drain(){
    }
    if(!style.length&&!entry[7])el.removeAttribute("style");
   }
-  restore.length=0;changed.clear();
+  restore.length=0;group.changed.clear();
  }
- function apply(el,attr){
-  var cls=el.getAttribute(attr);
-  if(!cls||cls==="none"||changed.has(el))return;
-  var style=el.style;
-  if(!style)return;
-  var name=el.getAttribute("vt-name")||("_OT_"+restore.length+"_");
-  var entry=[el,style.getPropertyValue("view-transition-name"),style.getPropertyPriority("view-transition-name"),style.getPropertyValue("view-transition-class"),style.getPropertyPriority("view-transition-class"),"","",el.hasAttribute("style")];
-  style.setProperty("view-transition-name",w.CSS.escape(name));
-  if(cls!=="auto")style.setProperty("view-transition-class",cls);
-  entry[5]=style.getPropertyValue("view-transition-name");
-  entry[6]=style.getPropertyValue("view-transition-class");
-  entry[8]=style.getPropertyPriority("view-transition-name");entry[9]=style.getPropertyPriority("view-transition-class");
-  restore.push(entry);changed.add(el);
- }
- function descendants(el,attr){
-  var nodes=el.querySelectorAll("["+attr+"]");
-  for(var i=0;i<nodes.length;i++)apply(nodes[i],attr);
- }
- try{
-  var appearing=new Map(),pendingImages=[];
-  for(var k=0;k<items.length;k++){
-   var id=items[k][0],nc=items[k][1];
+ function prepare(group){
+  var owner=group.owner,restore=group.restore,changed=group.changed,appearing=new Map();
+  if(!owner||typeof owner.startViewTransition!=="function")return;
+  function owns(el,content){
+   for(var node=el;node&&node.nodeType===1;node=node.parentElement){
+    if(node===owner)return true;
+    if(node.hasAttribute("vt-scope"))return false;
+    if(node===content)return true;
+   }
+   return owner===d;
+  }
+  function apply(el,attr,content){
+   var cls=el.getAttribute(attr);
+   if(!cls||cls==="none"||changed.has(el)||!owns(el,content))return;
+   var style=el.style;
+   if(!style)return;
+   var explicit=el.getAttribute("vt-name"),name=explicit||("_OT_"+restore.length+"_");
+   var entry=[el,style.getPropertyValue("view-transition-name"),style.getPropertyPriority("view-transition-name"),style.getPropertyValue("view-transition-class"),style.getPropertyPriority("view-transition-class"),"","",el.hasAttribute("style")];
+   if(el!==owner||explicit)style.setProperty("view-transition-name",w.CSS.escape(name));
+   if(cls!=="auto")style.setProperty("view-transition-class",cls);
+   entry[5]=style.getPropertyValue("view-transition-name");entry[6]=style.getPropertyValue("view-transition-class");
+   entry[8]=style.getPropertyPriority("view-transition-name");entry[9]=style.getPropertyPriority("view-transition-class");
+   restore.push(entry);changed.add(el);
+  }
+  function descendants(el,attr,content){
+   var nodes=el.querySelectorAll("["+attr+"]");
+   for(var i=0;i<nodes.length;i++)apply(nodes[i],attr,content);
+  }
+  for(var k=0;k<group.items.length;k++){
+   var id=group.items[k][0],nc=group.items[k][1];
    var t=d.querySelector('template[${STREAM_BOUNDARY_ATTR}="'+id+'"]');
    var s=d.querySelector('[${STREAM_SEGMENT_ATTR}="'+id+'"]');
-   if(!t||!s){reveal(id,nc);continue;}
+   if(!t||!s)continue;
    var parent=t.parentNode,rect=parent.getBoundingClientRect();
-   if(!rect.width&&!rect.height&&!rect.left&&!rect.top){reveal(id,nc);continue;}
+   if(!rect.width&&!rect.height&&!rect.left&&!rect.top)continue;
    var q=s.firstElementChild;
    if(q&&q.localName==="script"&&q.hasAttribute("${STREAM_SCRIPT_ATTR}")){
-    var parsed=d.createElement("template");parsed.innerHTML=JSON.parse(q.textContent);
-    s.replaceChildren(parsed.content);
+    var parsed=d.createElement("template");parsed.innerHTML=JSON.parse(q.textContent);s.replaceChildren(parsed.content);
    }
    var content=s;
    if(nc){content=s.firstElementChild;while(content&&content.localName==="script")content=content.nextElementSibling;}
-   if(!content){reveal(id,nc);continue;}
-   prepared.push([t,content,parent]);
+   if(!content)continue;
+   group.prepared.push([t,content,parent]);
    var matches=content.querySelectorAll("[vt-share]");
-   for(var i=0;i<matches.length;i++)if(matches[i].getAttribute("vt-share")!=="none")appearing.set(matches[i].getAttribute("vt-name"),matches[i]);
-   pendingImages.push.apply(pendingImages,content.querySelectorAll('img[src]:not([loading="lazy"])'));
+   for(var i=0;i<matches.length;i++)if(matches[i].getAttribute("vt-share")!=="none"&&owns(matches[i],content))appearing.set(matches[i].getAttribute("vt-name"),matches[i]);
+   var pendingImages=content.querySelectorAll('img[src]:not([loading="lazy"])');
+   for(var i=0;i<pendingImages.length;i++)if(owns(pendingImages[i],content))images.push(pendingImages[i]);
   }
   function pair(el){
+   if(!owns(el))return false;
    var other=appearing.get(el.getAttribute("vt-name"));
    if(other&&el.getAttribute("vt-share")&&el.getAttribute("vt-share")!=="none"){
-    apply(el,"vt-share");apply(other,"vt-share");appearing.delete(el.getAttribute("vt-name"));return true;
+    apply(el,"vt-share");apply(other,"vt-share",other.closest('[${STREAM_SEGMENT_ATTR}]'));appearing.delete(el.getAttribute("vt-name"));return true;
    }
    return false;
   }
-  for(var k=0;k<prepared.length;k++){
-   var t=prepared[k][0],content=prepared[k][1],parent=prepared[k][2];
-  var node=t.nextSibling,depth=1;
-  while(node){
-   if(node.nodeType===8){
-    var v=node.data,c=v.charAt(0),n=+v.slice(1),marker=v.length===1||(n>=2&&Number.isSafeInteger(n)&&String(n)===v.slice(1));
-    if(marker&&c==="[")depth++;else if(marker&&c==="]"&&!--depth)break;
-   }else if(node.nodeType===1){
-    if(!pair(node))apply(node,"vt-exit");
-    matches=node.querySelectorAll("[vt-share]");for(var j=0;j<matches.length;j++)pair(matches[j]);
-    descendants(node,"vt-parent-exit");
+  for(var k=0;k<group.prepared.length;k++){
+   var t=group.prepared[k][0],content=group.prepared[k][1],parent=group.prepared[k][2];
+   var node=t.nextSibling,depth=1;
+   while(node){
+    if(node.nodeType===8){
+     var v=node.data,c=v.charAt(0),n=+v.slice(1),marker=v.length===1||(n>=2&&Number.isSafeInteger(n)&&String(n)===v.slice(1));
+     if(marker&&c==="[")depth++;else if(marker&&c==="]"&&!--depth)break;
+    }else if(node.nodeType===1){
+     if(!pair(node))apply(node,"vt-exit");
+     matches=node.querySelectorAll("[vt-share]");for(var j=0;j<matches.length;j++)pair(matches[j]);
+     descendants(node,"vt-parent-exit");
+    }
+    node=node.nextSibling;
    }
-   node=node.nextSibling;
+   for(var el=content.firstElementChild;el;el=el.nextElementSibling){apply(el,"vt-enter",content);descendants(el,"vt-parent-enter",content);}
+   do{
+    for(var sibling=parent.firstElementChild;sibling;sibling=sibling.nextElementSibling)apply(sibling,"vt-update");
+    if(parent===owner)break;
+    parent=parent.parentNode;
+   }while(parent&&parent.nodeType===1&&parent.getAttribute("vt-update")!=="none");
   }
-  for(var el=content.firstElementChild;el;el=el.nextElementSibling){apply(el,"vt-enter");descendants(el,"vt-parent-enter");}
-  do{
-   for(var sibling=parent.firstElementChild;sibling;sibling=sibling.nextElementSibling)apply(sibling,"vt-update");
-   parent=parent.parentNode;
-  }while(parent&&parent.nodeType===1&&parent.getAttribute("vt-update")!=="none");
-  }
-  if(!restore.length){commit();later();return;}
-  images=pendingImages;
-  transition=d.startViewTransition({update:commit,types:[]});
-  d.__octaneViewTransition=transition;
-  transition.ready.then(reset,reset);
-  function complete(){reset();if(d.__octaneViewTransition===transition)d.__octaneViewTransition=null;drain();}
-  transition.finished.then(complete,complete);
- }catch(error){images=null;reset();if(transition&&d.__octaneViewTransition===transition)d.__octaneViewTransition=null;commit();later();}
+  if(owner!==d&&group.prepared.length)apply(owner,"vt-update");
+ }
+ var captures=[],documentGroup=null,elementsToEnter=0,remaining=0,resolveGate,rejectGate;
+ var gate=new Promise(function(resolve,reject){resolveGate=resolve;rejectGate=reject;});
+ gate.catch(function(){});
+ for(var i=0;i<groups.length;i++){
+  try{prepare(groups[i]);}catch(error){reset(groups[i]);}
+  if(groups[i].restore.length){captures.push(groups[i]);if(groups[i].owner===d)documentGroup=groups[i];else elementsToEnter++;}
+ }
+ remaining=captures.length;animated=remaining>0;
+ if(!remaining){images.length=0;commit();later();return;}
+ function arrive(group){
+  if(group.arrived)return gate;
+  group.arrived=true;remaining--;
+  if(group.owner!==d&&!--elementsToEnter&&documentGroup)start(documentGroup);
+  if(!remaining){try{Promise.resolve(commit()).then(resolveGate,rejectGate);}catch(error){rejectGate(error);}}
+  return gate;
+ }
+ function start(group){
+  if(group.started)return;group.started=true;
+  var owner=group.owner,transition;
+  try{
+   transition=owner.startViewTransition({update:function(){return arrive(group);},types:[]});
+   if(owner===d)d.__octaneViewTransition=transition;
+   else (d.__octaneViewTransitionScopes||(d.__octaneViewTransitionScopes=new Map())).set(owner,transition);
+   transition.ready.then(function(){ready.add(transition);reset(group);later();},function(){reset(group);});
+   function complete(){
+    reset(group);
+    if(owner===d){if(d.__octaneViewTransition===transition)d.__octaneViewTransition=null;}
+    else{var scopes=d.__octaneViewTransitionScopes;if(scopes&&scopes.get(owner)===transition)scopes.delete(owner);}
+    drain();
+   }
+   transition.finished.then(complete,complete);
+  }catch(error){reset(group);arrive(group);}
+ }
+ for(var i=0;i<captures.length;i++)if(captures[i].owner!==d)start(captures[i]);
+ if(!elementsToEnter&&documentGroup&&!documentGroup.arrived)start(documentGroup);
 }
 })();`);
 }

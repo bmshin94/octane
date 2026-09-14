@@ -848,6 +848,17 @@ function warnHydrationStructuralMismatch(
  * be compared positionally and is left to the per-site recovery. This makes the check safe
  * (never false-flags a hole-bearing template) while still catching pure-static divergences.
  */
+/** Only the exact server-owned scope suffix may differ from authored hydration CSS. */
+function hydrationScopeStyle(el: Element): string | null {
+	if (domNode(el).getAttribute('vt-scope') !== 'element') return null;
+	const authored = domNode(el).getAttribute('vt-scope-style');
+	if (authored === null) return null;
+	const suffix = domNode(el).hasAttribute('vt-scope-had-style')
+		? ';view-transition-scope:all!important'
+		: 'view-transition-scope:all!important';
+	return domNode(el).getAttribute('style') === authored + suffix ? authored : null;
+}
+
 function hydrationNodeMatches(
 	server: Node,
 	template: Node,
@@ -870,8 +881,8 @@ function hydrationNodeMatches(
 			domNode(s).getAttribute(domNode(a).name) !== domNode(a).value &&
 			!(
 				domNode(a).name === 'style' &&
-				partialStyles !== undefined &&
-				partialStyles.includes('|' + path + '|')
+				((partialStyles !== undefined && partialStyles.includes('|' + path + '|')) ||
+					hydrationScopeStyle(s) === domNode(a).value)
 			)
 		) {
 			return false;
@@ -3712,6 +3723,8 @@ type ViewTransitionRef =
 
 export interface ViewTransitionProps {
 	name?: string;
+	/** Create an element scope from one persistent host. Omitted boundaries inherit their scope. */
+	scope?: 'element';
 	ref?: ViewTransitionRef;
 	enter?: ViewTransitionClassValue;
 	exit?: ViewTransitionClassValue;
@@ -3795,17 +3808,27 @@ interface VTHandle {
 	updateCallbackDone?: Promise<void>;
 	skipTransition: () => void;
 }
+type VTStart = (
+	update: (() => void | Promise<void>) | { update: () => void | Promise<void>; types: string[] },
+) => VTHandle;
+type VTOwner = (Document | Element) & { startViewTransition?: VTStart };
 type VTDocument = Document & {
-	startViewTransition?: (
-		update:
-			| (() => void | Promise<void>)
-			| {
-					update: () => void | Promise<void>;
-					types: string[];
-			  },
-	) => VTHandle;
+	startViewTransition?: VTStart;
 	__octaneViewTransition?: VTHandle | null;
+	__octaneViewTransitionScopes?: Map<Element, VTHandle>;
 };
+
+interface VTCapture {
+	interrupt: () => void;
+	ready: Promise<void>;
+	release: () => void;
+	completed: boolean;
+}
+interface VTSession {
+	owner: VTOwner;
+	handle: VTHandle;
+	interrupt: (() => void) | undefined;
+}
 
 interface VtMeasurement {
 	x: number;
@@ -3824,6 +3847,7 @@ interface VtSavedStyle {
 /** One tracked boundary for the current wrapped flush. */
 interface VtRec {
 	block: Block;
+	owner: VTOwner | null;
 	props: ViewTransitionProps | null;
 	els: Element[];
 	rects: VtMeasurement[];
@@ -3833,6 +3857,26 @@ interface VtRec {
 	oldCaptured: boolean;
 	cls: string;
 	styles: Map<Element, VtSavedStyle>;
+}
+interface VtGroup {
+	owner: VTOwner;
+	recs: VtRec[];
+	records: Map<Block, VtRec>;
+	styles: Map<Element, VtSavedStyle>;
+	visibleBefore: Set<Block>;
+	planned: Map<Block, ViewTransitionProps | null>;
+	acts: Array<{ kind: VtActivationKind; rec: VtRec }>;
+	animations: Animation[];
+	cleanups: Array<() => void>;
+	warnedNames: Set<string>;
+	handle: VTHandle | null;
+	session: VTSession | null;
+	valid: boolean;
+	arrived: boolean;
+	settled: boolean;
+	interrupted: boolean;
+	skipRequested: boolean;
+	restoreRoot: (() => void) | null;
 }
 type VtActivationKind = 'enter' | 'exit' | 'update' | 'share' | 'parent-enter' | 'parent-exit';
 
@@ -3850,11 +3894,12 @@ interface ViewTransitionDriver {
 	interrupt(): void;
 	deferPassives(): boolean;
 	wouldWrap(): boolean;
-	wrapResume(work: () => void): boolean;
+	wrapResume(work: () => void, getBlocks?: () => readonly Block[]): boolean;
 	unregister(block: Block): void;
 	markDirty(): void;
 	queueAllTransition(): boolean;
 	renderBoundary(block: Block, props: ViewTransitionProps): void;
+	authoredScopeStyle(el: HTMLElement | SVGElement, style: CSSStyleDeclaration): void;
 }
 
 let VIEW_TRANSITION_DRIVER: ViewTransitionDriver | null = null;
@@ -3864,20 +3909,16 @@ const VT_REGISTRY = /* @__PURE__ */ new Set<Block>();
 const VT_DIRTY = /* @__PURE__ */ new Set<Block>();
 /** True while the wrapped drain (the update callback's flushWork) runs. */
 let VT_DRAIN = false;
-/** Controller state: idle → pending (update not yet run) → animating. */
-const VT_IDLE = 0,
-	VT_PENDING_UPDATE = 1,
-	VT_ANIMATING = 2;
-let VT_STATE: 0 | 1 | 2 = VT_IDLE;
-let VT_HANDLE: VTHandle | null = null;
-let VT_INTERRUPT_CURRENT: (() => void) | null = null;
-let VT_WAITING_HANDLE: VTHandle | null = null;
+/** Preparation and capture stay atomic; finished captures animate per owner. */
+let VT_CAPTURE: VTCapture | null = null;
+const VT_SESSIONS = /* @__PURE__ */ new Map<VTOwner, VTSession>();
+const VT_WAITING_HANDLES = /* @__PURE__ */ new Set<VTHandle>();
 let VT_NAME_SEQ = 0;
-/** A scheduled passive drain deferred until the transition's `finished`. */
-let VT_PASSIVES_HELD = false;
 interface ViewTransitionBoundaryState {
 	autoName: string;
 	instance: ViewTransitionInstance | null;
+	instanceScope: Element | null;
+	scopeHost: Element | null;
 }
 /** Optional boundary identities never add fields to ordinary component blocks. */
 const VT_BOUNDARIES = /* @__PURE__ */ new WeakMap<Block, ViewTransitionBoundaryState>();
@@ -3886,14 +3927,34 @@ const VT_REF_SLOT = /* @__PURE__ */ Symbol('ViewTransition.ref');
 function vtBoundaryState(block: Block): ViewTransitionBoundaryState {
 	let state = VT_BOUNDARIES.get(block);
 	if (state === undefined) {
-		state = { autoName: '', instance: null };
+		state = { autoName: '', instance: null, instanceScope: null, scopeHost: null };
 		VT_BOUNDARIES.set(block, state);
 	}
 	return state;
 }
 
+/** Resolve a scope root against actual CSS; a supplied style view serves internal preparation. */
+function vtScopeName(host: Element, style = (host as HTMLElement).style): string {
+	const inline = style.getPropertyValue('view-transition-name');
+	if (inline !== '') return inline;
+	const computed = host.ownerDocument.defaultView
+		?.getComputedStyle(host)
+		.getPropertyValue('view-transition-name');
+	// Native scope activation supplies `root` only while active. At that
+	// point computed `none` is an authored opt-out, including a stylesheet.
+	return computed &&
+		(computed !== 'none' ||
+			(host as Element & { activeViewTransition?: unknown }).activeViewTransition != null)
+		? computed
+		: 'root';
+}
+
 function vtGetName(block: Block, props: ViewTransitionProps | null = block.vt): string {
 	if (props?.name != null && props.name !== 'auto') return props.name;
+	if (props?.scope === 'element') {
+		const host = vtScopeHost(block);
+		if (host !== null) return vtScopeName(host, domNode(host as HTMLElement).style);
+	}
 	const state = vtBoundaryState(block);
 	if (state.autoName === '') state.autoName = '‹vt' + ++VT_NAME_SEQ + '›';
 	return state.autoName;
@@ -3903,20 +3964,266 @@ function vtCssName(name: string): string {
 	return typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(name) : name;
 }
 
-function vtGetInstance(block: Block, name = vtGetName(block)): ViewTransitionInstance {
-	const state = vtBoundaryState(block);
-	if (state.instance !== null && state.instance.name === name) return state.instance;
+/** A declaration owns exactly one host; text siblings would fall outside its capture. */
+function vtScopeHost(block: Block): Element | null {
+	const els = vtRangeElements(block);
+	if (els.length !== 1) return null;
+	const end = block.endMarker;
+	for (
+		let node =
+			block.startMarker === null
+				? domNode(block.parentNode).firstChild
+				: domNode(block.startMarker).nextSibling;
+		node !== null && node !== end;
+		node = domNode(node).nextSibling
+	) {
+		if (node.nodeType === 3 && (domNode(node).nodeValue ?? '').trim() !== '') return null;
+	}
+	return els[0];
+}
+
+/** Read projected parents directly; selector cloning would materialize whole subtrees. */
+function vtClosestScope(node: Node | null): Element | null {
+	for (; node !== null; node = domNode(node).parentNode) {
+		if (node.nodeType === 1 && domNode(node as Element).hasAttribute('vt-scope'))
+			return node as Element;
+	}
+	return null;
+}
+
+/** Logical declarations bound their physical hosts, including portaled descendants. */
+function vtScopeForBlock(block: Block): VTOwner | null {
+	for (let ancestor: Block | null = block; ancestor !== null; ancestor = ancestor.parentBlock) {
+		if (ancestor.vt?.scope !== 'element') continue;
+		const host = vtScopeHost(ancestor);
+		if (host === null) return null;
+		if (ancestor !== block) {
+			const parent = block.parentNode;
+			if (parent !== host && !domNode(host).contains(parent)) {
+				// A composite child may produce the scope host itself; its parent
+				// is outside the host even though its rendered range is owned here.
+				const elements = vtRangeElements(block);
+				if (
+					elements.length === 0 ||
+					elements.some((element) => element !== host && !domNode(host).contains(element))
+				)
+					return null;
+			}
+		}
+		return host as VTOwner;
+	}
 	const parent = block.parentNode;
-	const owner = parent.nodeType === 9 ? (parent as Document) : parent.ownerDocument!;
-	const scope = owner.documentElement;
-	return (state.instance = {
+	const physical = vtClosestScope(parent);
+	if (physical !== null)
+		return domNode(physical).getAttribute('vt-scope') === 'element' ? (physical as VTOwner) : null;
+	return (parent.nodeType === 9 ? parent : parent.ownerDocument!) as VTOwner;
+}
+
+/** A nested declaration owns its hosts even while its native animation is idle. */
+function vtCaptureElements(block: Block, owner: VTOwner): Element[] {
+	return vtRangeElements(block).filter((element) => {
+		const nearest = vtClosestScope(element);
+		return owner.nodeType === 9 ? nearest === null : nearest === owner;
+	});
+}
+
+interface ViewTransitionScopeStyle {
+	owners: Block[];
+	value: string;
+	priority: string;
+	hadStyle: boolean;
+}
+/** Nested declarations may share a direct host; only the final release restores it. */
+const VT_SCOPE_STYLES = /* @__PURE__ */ new WeakMap<Element, ViewTransitionScopeStyle>();
+
+function vtJournalScopeHost(host: Element): void {
+	if (TRANSITION_JOURNAL === null) return;
+	for (const name of ['style', 'vt-scope', 'vt-scope-style', 'vt-scope-had-style'])
+		journalAttr(host, name);
+}
+
+function vtReleaseScopeBoundary(block: Block): void {
+	const state = VT_BOUNDARIES.get(block);
+	if (state?.scopeHost == null) return;
+	const host = state.scopeHost;
+	const saved = VT_SCOPE_STYLES.get(host);
+	if (TRANSITION_JOURNAL !== null) journalObjectOnce(state);
+	state.scopeHost = null;
+	if (saved === undefined) return;
+	if (TRANSITION_JOURNAL !== null) journalObjectOnce(saved);
+	saved.owners = saved.owners.filter((owner) => owner !== block);
+	if (saved.owners.length !== 0) return;
+	if (!VT_DRAIN) vtInterruptOwner(host as VTOwner);
+	vtJournalScopeHost(host);
+	const style = domNode(host as HTMLElement).style;
+	if (
+		style.getPropertyValue('view-transition-scope') === 'all' &&
+		style.getPropertyPriority('view-transition-scope') === 'important'
+	) {
+		style.setProperty('view-transition-scope', saved.value, saved.priority);
+		if (!saved.hadStyle && style.length === 0) domNode(host).removeAttribute('style');
+	}
+	for (const name of ['vt-scope', 'vt-scope-style', 'vt-scope-had-style'])
+		domNode(host).removeAttribute(name);
+	if (TRANSITION_JOURNAL !== null) journalUndo(() => VT_SCOPE_STYLES.set(host, saved));
+	VT_SCOPE_STYLES.delete(host);
+}
+
+/** Observe actual authored writes, including values equal to the owned declaration. */
+function vtAuthoredScopeStyle(el: HTMLElement | SVGElement, style: CSSStyleDeclaration): void {
+	const saved = VT_SCOPE_STYLES.get(el);
+	// Hydration also calls the shared style serializers with an inert CSSOM.
+	if (saved === undefined || style !== domNode(el).style) return;
+	if (TRANSITION_JOURNAL !== null) journalObjectOnce(saved);
+	saved.value = style.getPropertyValue('view-transition-scope');
+	saved.priority = style.getPropertyPriority('view-transition-scope');
+	saved.hadStyle = domNode(el).hasAttribute('style');
+	if (saved.value !== 'all' || saved.priority !== 'important')
+		style.setProperty('view-transition-scope', 'all', 'important');
+}
+
+/** Keep nested scopes isolated even before they start their own native transition. */
+function vtPrepareScopeBoundary(block: Block): void {
+	if (block.vt?.scope !== 'element' && VT_BOUNDARIES.get(block)?.scopeHost == null) return;
+	const host = block.vt?.scope === 'element' ? vtScopeHost(block) : null;
+	const state = vtBoundaryState(block);
+	if (state.scopeHost !== null && state.scopeHost !== host) vtReleaseScopeBoundary(block);
+	if (host === null) return;
+	if (TRANSITION_JOURNAL !== null) journalObjectOnce(state);
+	const style = domNode(host as HTMLElement).style;
+	let saved = VT_SCOPE_STYLES.get(host);
+	if (saved === undefined) {
+		const serverStyle = domNode(host).getAttribute('vt-scope-style');
+		let original = style;
+		if (serverStyle !== null) {
+			// Parse only inert style data; no authored markup or custom element runs.
+			original = host.ownerDocument.createElement('span').style;
+			original.cssText = serverStyle;
+		}
+		saved = {
+			owners: [],
+			value: original.getPropertyValue('view-transition-scope'),
+			priority: original.getPropertyPriority('view-transition-scope'),
+			hadStyle:
+				serverStyle === null
+					? domNode(host).hasAttribute('style')
+					: domNode(host).hasAttribute('vt-scope-had-style'),
+		};
+		if (TRANSITION_JOURNAL !== null) journalUndo(() => VT_SCOPE_STYLES.delete(host));
+		VT_SCOPE_STYLES.set(host, saved);
+	} else if (
+		style.getPropertyValue('view-transition-scope') !== 'all' ||
+		style.getPropertyPriority('view-transition-scope') !== 'important'
+	) {
+		if (TRANSITION_JOURNAL !== null) journalObjectOnce(saved);
+		saved.value = style.getPropertyValue('view-transition-scope');
+		saved.priority = style.getPropertyPriority('view-transition-scope');
+		saved.hadStyle = domNode(host).hasAttribute('style');
+	}
+	if (state.scopeHost !== host) {
+		if (TRANSITION_JOURNAL !== null) journalObjectOnce(saved);
+		saved.owners = [...saved.owners, block];
+		state.scopeHost = host;
+	}
+	vtJournalScopeHost(host);
+	if (domNode(host).getAttribute('vt-scope') !== 'element')
+		domNode(host).setAttribute('vt-scope', 'element');
+	if (
+		style.getPropertyValue('view-transition-scope') !== 'all' ||
+		style.getPropertyPriority('view-transition-scope') !== 'important'
+	)
+		style.setProperty('view-transition-scope', 'all', 'important');
+	// The server handoff has been adopted. Only the owned CSS property is restored later.
+	if (domNode(host).hasAttribute('vt-scope-style')) domNode(host).removeAttribute('vt-scope-style');
+	if (domNode(host).hasAttribute('vt-scope-had-style'))
+		domNode(host).removeAttribute('vt-scope-had-style');
+}
+
+interface ViewTransitionScopeRef {
+	scope: Element;
+	instance: ViewTransitionInstance;
+}
+const VT_SCOPE_REFS = /* @__PURE__ */ new WeakMap<Block, ViewTransitionScopeRef>();
+
+function vtCreateInstance(name: string, scope: Element): ViewTransitionInstance {
+	return {
 		name,
 		group: new ViewTransitionPseudoElement('group', name, scope),
 		imagePair: new ViewTransitionPseudoElement('image-pair', name, scope),
 		old: new ViewTransitionPseudoElement('old', name, scope),
 		new: new ViewTransitionPseudoElement('new', name, scope),
-	});
+	};
 }
+
+/** A held unnamed scope ref follows committed CSS, including updates in a child. */
+function vtScopeRefInstance(block: Block, scope: Element): ViewTransitionInstance {
+	const previous = VT_SCOPE_REFS.get(block);
+	if (previous?.scope === scope) return previous.instance;
+	let current: ViewTransitionInstance | null = null;
+	const resolve = (): ViewTransitionInstance => {
+		// Public reads must never expose the staged style projection before commit.
+		const name = vtScopeName(scope);
+		if (current === null || current.name !== name) current = vtCreateInstance(name, scope);
+		return current;
+	};
+	const instance: ViewTransitionInstance = {
+		get name() {
+			return resolve().name;
+		},
+		get group() {
+			return resolve().group;
+		},
+		get imagePair() {
+			return resolve().imagePair;
+		},
+		get old() {
+			return resolve().old;
+		},
+		get new() {
+			return resolve().new;
+		},
+	};
+	if (TRANSITION_JOURNAL !== null)
+		journalUndo(() => {
+			if (previous === undefined) VT_SCOPE_REFS.delete(block);
+			else VT_SCOPE_REFS.set(block, previous);
+		});
+	VT_SCOPE_REFS.set(block, { scope, instance });
+	return instance;
+}
+
+function vtGetInstance(
+	block: Block,
+	name = vtGetName(block),
+	target = vtScopeForBlock(block),
+): ViewTransitionInstance {
+	const state = vtBoundaryState(block);
+	const parent = block.parentNode;
+	const owner = parent.nodeType === 9 ? (parent as Document) : parent.ownerDocument!;
+	const scope =
+		target?.nodeType === 1
+			? (target as Element)
+			: target?.nodeType === 9
+				? (target as Document).documentElement
+				: owner.documentElement;
+	// Live ref mode is separate from the immutable name/owner cache. An explicit
+	// prop equal to the current CSS name must still detach the live ref lifetime.
+	if (
+		!block.disposed &&
+		target?.nodeType === 1 &&
+		block.vt?.scope === 'element' &&
+		(block.vt.name == null || block.vt.name === 'auto')
+	) {
+		const live = VT_SCOPE_REFS.get(block);
+		if (live?.scope === scope && live.instance.name === name) return live.instance;
+	}
+	if (state.instance !== null && state.instance.name === name && state.instanceScope === scope)
+		return state.instance;
+	if (TRANSITION_JOURNAL !== null) journalObjectOnce(state);
+	state.instanceScope = scope;
+	return (state.instance = vtCreateInstance(name, scope));
+}
+
 /**
  * Transition types staged by addTransitionType() for the CURRENT transition
  * batch — captured (and reset) by the flush that commits the batch, whether
@@ -4062,6 +4369,7 @@ function vtRelayOutermost(
 
 function vtApplyStyles(rec: VtRec, cls: string): void {
 	if (rec.name === '') rec.name = vtGetName(rec.block, rec.props);
+	if (rec.name === 'none' && rec.owner?.nodeType === 1 && rec.els[0] === rec.owner) return;
 	rec.cls = cls === 'auto' || cls === 'none' ? '' : cls;
 	for (let i = 0; i < rec.els.length; i++) {
 		const el = rec.els[i] as HTMLElement;
@@ -4075,7 +4383,15 @@ function vtApplyStyles(rec: VtRec, cls: string): void {
 				classPriority: style.getPropertyPriority('view-transition-class'),
 			});
 		}
-		style.setProperty('view-transition-name', vtCssName(i === 0 ? rec.name : rec.name + '-' + i));
+		const scopeRoot = rec.owner === el && rec.props?.scope === 'element';
+		// Let native self-participation honor stylesheet names (and `none`).
+		// An explicit component name is the only override for a scope root.
+		if (!scopeRoot || (rec.props?.name != null && rec.props.name !== 'auto'))
+			style.setProperty(
+				'view-transition-name',
+				vtCssName(i === 0 ? rec.name : rec.name + '-' + i),
+				scopeRoot ? 'important' : '',
+			);
 		if (rec.cls !== '') style.setProperty('view-transition-class', rec.cls);
 	}
 }
@@ -4157,6 +4473,7 @@ function vtCreateRecord(block: Block, els: Element[], styles: Map<Element, VtSav
 	const name = vtGetName(block, props);
 	return {
 		block,
+		owner: vtScopeForBlock(block),
 		props,
 		els,
 		rects: vtMeasureElements(els),
@@ -4171,7 +4488,8 @@ function vtCreateRecord(block: Block, els: Element[], styles: Map<Element, VtSav
 
 /** Hide a pre-captured old group after determining that it must not animate. */
 function vtCancelOldCapture(rec: VtRec, cancelledAnimations: Animation[]): void {
-	const root = rec.els[0]?.ownerDocument.documentElement;
+	const root =
+		rec.owner?.nodeType === 1 ? (rec.owner as Element) : rec.els[0]?.ownerDocument.documentElement;
 	if (root === undefined || typeof root.animate !== 'function') return;
 	for (let i = 0; i < rec.rects.length; i++) {
 		cancelledAnimations.push(
@@ -4204,7 +4522,7 @@ function vtFireCallback(kind: VtActivationKind, rec: VtRec, types: string[]): vo
 							? props.onParentEnter
 							: props.onParentExit;
 	if (typeof cb !== 'function') return;
-	const instance = vtGetInstance(rec.block, rec.name);
+	const instance = vtGetInstance(rec.block, rec.name, rec.owner);
 	try {
 		const cleanup = cb(instance, types);
 		if (typeof cleanup === 'function') return cleanup;
@@ -4292,6 +4610,7 @@ function vtWaitForResources(
 	owner: Document,
 	fontsWereLoaded: boolean,
 	mutations: MutationRecord[],
+	captureOwners?: Set<VTOwner>,
 ): Promise<void> | null {
 	const candidates = new Set<Element>();
 	const collect = (node: Node): void => {
@@ -4319,6 +4638,13 @@ function vtWaitForResources(
 	for (const el of candidates) {
 		if (!domNode(el).isConnected) continue;
 		if (el.localName === 'img') {
+			// Images outside the participating native scopes cannot affect their
+			// snapshots. Fonts and stylesheets still affect document-wide layout.
+			if (
+				captureOwners !== undefined &&
+				!captureOwners.has((vtClosestScope(el) ?? owner) as VTOwner)
+			)
+				continue;
 			const img = el as HTMLImageElement;
 			if (
 				img.complete ||
@@ -4415,31 +4741,164 @@ function vtScheduleQueuedWork(): void {
 	}
 }
 
-/** A streamed reveal and a hydrated client share the document's native slot. */
-function vtWaitForExternalHandle(): boolean {
-	const handle =
-		typeof document === 'undefined' ? null : (document as VTDocument).__octaneViewTransition;
-	if (handle == null || handle === VT_HANDLE) return false;
-	if (VT_WAITING_HANDLE !== handle) {
-		VT_WAITING_HANDLE = handle;
+/** Native slots are shared with streamed reveals, using the actual native handles. */
+function vtOwnerDocument(owner: VTOwner): VTDocument {
+	return (owner.nodeType === 9 ? owner : owner.ownerDocument!) as VTDocument;
+}
+
+function vtBeginCapture(interrupt: () => void): VTCapture {
+	let release!: () => void;
+	const capture: VTCapture = {
+		interrupt,
+		ready: new Promise<void>((resolve) => {
+			release = resolve;
+		}),
+		release: () => release(),
+		completed: false,
+	};
+	VT_CAPTURE = capture;
+	return capture;
+}
+
+function vtRegisterHandle(
+	_capture: VTCapture,
+	owner: VTOwner,
+	handle: VTHandle,
+	interrupt?: () => void,
+): VTSession {
+	const session: VTSession = { owner, handle, interrupt };
+	VT_SESSIONS.set(owner, session);
+	const doc = vtOwnerDocument(owner);
+	if (owner.nodeType === 9) doc.__octaneViewTransition = handle;
+	else (doc.__octaneViewTransitionScopes ??= new Map()).set(owner as Element, handle);
+	return session;
+}
+
+/** Release only after every native ready promise settled and names were restored. */
+function vtCompleteCapture(capture: VTCapture): void {
+	if (capture.completed) return;
+	capture.completed = true;
+	if (VT_CAPTURE === capture) VT_CAPTURE = null;
+	capture.release();
+	vtScheduleQueuedWork();
+}
+
+function vtFinishHandle(session: VTSession): void {
+	const { owner, handle } = session;
+	if (VT_SESSIONS.get(owner) === session) VT_SESSIONS.delete(owner);
+	const doc = vtOwnerDocument(owner);
+	if (owner.nodeType === 9) {
+		if (doc.__octaneViewTransition === handle) doc.__octaneViewTransition = null;
+	} else if (doc.__octaneViewTransitionScopes?.get(owner as Element) === handle) {
+		doc.__octaneViewTransitionScopes.delete(owner as Element);
+	}
+	vtScheduleQueuedWork();
+}
+
+/** Queue ancestors may replace any nested scope, so the entire batch waits together. */
+function vtQueuedOwners(blocks: readonly Block[] = QUEUE): Set<VTOwner> | null {
+	if (blocks.length === 0) return null;
+	const owners = new Set<VTOwner>();
+	for (const block of blocks) {
+		const owner = vtScopeForBlock(block);
+		if (owner === null) return null;
+		owners.add(owner);
+	}
+	const queued = blocks.length > 1 ? new Set(blocks) : null;
+	for (const boundary of VT_REGISTRY) {
+		if (boundary.disposed || boundary.vt === null) continue;
+		for (let ancestor = boundary.parentBlock; ancestor !== null; ancestor = ancestor.parentBlock) {
+			if (queued === null ? ancestor !== blocks[0] : !queued.has(ancestor)) continue;
+			const owner = vtScopeForBlock(boundary);
+			if (owner !== null) owners.add(owner);
+			break;
+		}
+	}
+	return owners;
+}
+
+function vtOwnerAffected(owner: VTOwner, owners: Set<VTOwner> | null): boolean {
+	if (owners === null || owners.has(owner)) return true;
+	for (const candidate of owners) {
+		// Persistent child scopes are isolated from animating ancestors. An
+		// incoming element owner may remove its children. Document ownership
+		// alone is insufficient: unrelated unscoped updates share that owner,
+		// while queued root/ancestor blocks explicitly include nested scopes.
+		if (
+			candidate.nodeType !== 9 &&
+			owner.nodeType !== 9 &&
+			(candidate as Element).contains(owner as Element)
+		)
+			return true;
+	}
+	return false;
+}
+
+function vtDocumentsForOwners(owners: Set<VTOwner> | null): Set<VTDocument> {
+	const docs = new Set<VTDocument>();
+	if (owners !== null) {
+		for (const owner of owners) docs.add(vtOwnerDocument(owner));
+	} else {
+		for (const session of VT_SESSIONS.values()) docs.add(vtOwnerDocument(session.owner));
+		if (typeof document !== 'undefined') docs.add(document as VTDocument);
+	}
+	return docs;
+}
+
+function vtActiveHandles(owners: Set<VTOwner> | null): Set<VTHandle> {
+	const handles = new Set<VTHandle>();
+	for (const session of VT_SESSIONS.values())
+		if (vtOwnerAffected(session.owner, owners)) handles.add(session.handle);
+	for (const doc of vtDocumentsForOwners(owners)) {
+		const handle = doc.__octaneViewTransition;
+		// An external document update has no Octane capture receipt. Its pending
+		// callback can block element callbacks, so wait conservatively.
+		if (handle != null && VT_SESSIONS.get(doc)?.handle !== handle) handles.add(handle);
+		for (const [owner, scoped] of doc.__octaneViewTransitionScopes ?? []) {
+			if (vtOwnerAffected(owner as VTOwner, owners)) handles.add(scoped);
+		}
+	}
+	return handles;
+}
+
+function vtWaitForHandles(handles: Set<VTHandle>, owners: Set<VTOwner> | null): boolean {
+	const docs = vtDocumentsForOwners(owners);
+	for (const handle of handles) {
+		if (VT_WAITING_HANDLES.has(handle)) continue;
+		VT_WAITING_HANDLES.add(handle);
 		const done = (): void => {
-			if (VT_WAITING_HANDLE === handle) VT_WAITING_HANDLE = null;
-			if ((document as VTDocument).__octaneViewTransition === handle)
-				(document as VTDocument).__octaneViewTransition = null;
+			VT_WAITING_HANDLES.delete(handle);
+			// Client sessions remove their own slots. External stream handles may
+			// leave a fulfilled slot behind until their transport callback runs.
+			for (const doc of docs) {
+				if (doc.__octaneViewTransition === handle && VT_SESSIONS.get(doc)?.handle !== handle)
+					doc.__octaneViewTransition = null;
+				for (const [owner, scoped] of doc.__octaneViewTransitionScopes ?? [])
+					if (scoped === handle && VT_SESSIONS.get(owner as VTOwner)?.handle !== handle)
+						doc.__octaneViewTransitionScopes!.delete(owner);
+			}
 			vtScheduleQueuedWork();
 		};
 		handle.finished.then(done, done);
 	}
-	return true;
+	return handles.size > 0;
+}
+
+function vtInterruptOwners(owners: Set<VTOwner> | null): void {
+	// A pending capture owns one indivisible mutation/layout transaction.
+	VT_CAPTURE?.interrupt();
+	const handles = vtActiveHandles(owners);
+	for (const session of VT_SESSIONS.values())
+		if (handles.has(session.handle)) session.interrupt?.();
+	for (const handle of handles) handle.skipTransition();
+}
+
+function vtInterruptOwner(owner: VTOwner): void {
+	vtInterruptOwners(new Set([owner]));
 }
 
 function vtInterrupt(): void {
-	VT_INTERRUPT_CURRENT?.();
-	const handle =
-		typeof document === 'undefined'
-			? VT_HANDLE
-			: ((document as VTDocument).__octaneViewTransition ?? VT_HANDLE);
-	handle?.skipTransition();
+	vtInterruptOwners(null);
 }
 
 /** Is every queued block scheduled at transition priority? (Empty → false.) */
@@ -4451,38 +4910,27 @@ function queueAllTransition(): boolean {
 	return true;
 }
 
-/**
- * Would the next drain be routed through document.startViewTransition?
- * Shared by flush() and act()'s synchronous drain loop (which otherwise
- * drains via flushSync — the urgent path that deliberately skips wrapping).
- */
-function vtWouldWrap(): boolean {
-	return (
-		VT_STATE === VT_IDLE &&
-		activeHydration() === null &&
-		queueAllTransition() &&
-		typeof document !== 'undefined' &&
-		(document as VTDocument).startViewTransition !== undefined
-	);
+function vtHasActiveHandles(): boolean {
+	if (VT_SESSIONS.size > 0) return true;
+	if (typeof document === 'undefined') return false;
+	const doc = document as VTDocument;
+	return doc.__octaneViewTransition != null || (doc.__octaneViewTransitionScopes?.size ?? 0) > 0;
 }
 
-/**
- * Same question for a Suspense reveal commit (commitResume /
- * flushStagedReveals — they run OUTSIDE the flush, in thenable microtasks).
- * The driver is installed at module load by the compiler hint, so the
- * pre-snapshot can run even when the reveal itself mounts the app's first
- * boundary. A direct runtime consumer falls back to installation on first
- * boundary render, matching the pre-capability behavior.
- */
-function vtWouldWrapResume(): boolean {
-	return (
-		VT_STATE === VT_IDLE &&
-		activeHydration() === null &&
-		!inFlush &&
-		!VT_DRAIN &&
-		typeof document !== 'undefined' &&
-		(document as VTDocument).startViewTransition !== undefined
-	);
+function vtNativeAvailable(owners: Set<VTOwner> | null): boolean {
+	if (typeof document !== 'undefined' && (document as VTDocument).startViewTransition !== undefined)
+		return true;
+	if (owners !== null)
+		for (const owner of owners) if (owner.startViewTransition !== undefined) return true;
+	return false;
+}
+
+/** Whether act's synchronous loop can start a capture without waiting for native work. */
+function vtWouldWrap(): boolean {
+	if (VT_CAPTURE !== null || activeHydration() !== null || !queueAllTransition()) return false;
+	if (!vtHasActiveHandles() && vtNativeAvailable(null)) return true;
+	const owners = vtQueuedOwners();
+	return vtNativeAvailable(owners) && vtActiveHandles(owners).size === 0;
 }
 
 /** Install the concrete driver only when a ViewTransition-facing API survives. */
@@ -4493,17 +4941,22 @@ function ensureViewTransitionDriver(): ViewTransitionDriver {
 			if (VT_PENDING_TYPES.indexOf(type) === -1) VT_PENDING_TYPES.push(type);
 		},
 		routeFlush() {
-			if (VT_STATE === VT_IDLE && vtWaitForExternalHandle()) {
-				if (queueAllTransition()) return true;
-				vtInterrupt();
+			if (VT_CAPTURE !== null) {
+				if (DEFERRED_LAYOUT_DRIVER?.holdsPendingQueue() === true || queueAllTransition())
+					return true;
+				if (QUEUE.length > 0 || ROOT_RENDER_TRANSACTIONS.length > 0) vtInterrupt();
 				return false;
 			}
-			if (VT_STATE !== VT_IDLE) {
-				if (DEFERRED_LAYOUT_DRIVER?.holdsPendingQueue() === true) return true;
-				// Transition work waits for the active update/animation; urgent work
-				// interrupts and falls through to the ordinary flush.
-				if (queueAllTransition()) return true;
-				if (QUEUE.length > 0) vtInterrupt();
+			if (!vtHasActiveHandles()) {
+				if (!vtWouldWrap()) return false;
+				vtFlush();
+				return true;
+			}
+			const owners = vtQueuedOwners();
+			const handles = vtActiveHandles(owners);
+			if (handles.size > 0) {
+				if (queueAllTransition()) return vtWaitForHandles(handles, owners);
+				vtInterruptOwners(owners);
 				return false;
 			}
 			if (!vtWouldWrap()) return false;
@@ -4522,33 +4975,44 @@ function ensureViewTransitionDriver(): ViewTransitionDriver {
 		},
 		interrupt: vtInterrupt,
 		deferPassives() {
-			if (VT_STATE === VT_IDLE) return false;
-			VT_PASSIVES_HELD = true;
-			return true;
+			// Transition passives live on their own deferred-layout receipt. Global
+			// queues can belong to an unrelated scope that is already committed.
+			return false;
 		},
 		wouldWrap: vtWouldWrap,
-		wrapResume(work) {
+		wrapResume(work, getBlocks) {
 			if (inFlush || VT_DRAIN || activeHydration() !== null || typeof document === 'undefined')
 				return false;
-			const active = (document as VTDocument).__octaneViewTransition ?? VT_HANDLE;
-			if (active != null) {
+			const capture = VT_CAPTURE;
+			const blocks = getBlocks?.() ?? [];
+			const owners = vtQueuedOwners(blocks);
+			const handles = vtActiveHandles(owners);
+			if (capture !== null || handles.size > 0) {
+				vtWaitForHandles(handles, owners);
 				const resume = (): void => {
-					if (!driver.wrapResume(work)) work();
+					if (!driver.wrapResume(work, getBlocks)) work();
 				};
-				active.finished.then(resume, resume);
+				const waits: Promise<void>[] = [];
+				if (capture !== null) waits.push(capture.ready);
+				for (const handle of handles) waits.push(handle.finished);
+				Promise.allSettled(waits).then(resume);
 				return true;
 			}
-			if (!vtWouldWrapResume()) return false;
-			vtFlush(work);
+			if (!vtNativeAvailable(owners)) return false;
+			vtFlush(work, owners, blocks);
 			return true;
 		},
 		unregister(block) {
-			if (block.vt !== null) VT_REGISTRY.delete(block);
+			if (block.vt !== null) {
+				vtReleaseScopeBoundary(block);
+				VT_REGISTRY.delete(block);
+			}
 		},
 		markDirty() {
 			if (VT_DRAIN) vtMarkDirtyFromCurrentBlock();
 		},
 		queueAllTransition,
+		authoredScopeStyle: vtAuthoredScopeStyle,
 		renderBoundary(block, props) {
 			if (TRANSITION_JOURNAL !== null) journalRootProperty(block, 'vt', block.vt);
 			if (block.vt === null) {
@@ -5776,96 +6240,29 @@ function flushWork(): void {
 	}
 }
 
-/**
- * A transition-lane flush routed through `document.startViewTransition` —
- * see the View Transitions block above for the full model. The browser
- * snapshots the current state after preparation, the host plan publishes inside
- * its update callback, activations resolve from committed geometry, and callbacks fire
- * once the transition is `ready`. When the drain turns out to touch no
- * boundary, the transition is skipped (mutations still applied, no animation).
- */
-function vtFlush(work: () => void = flushWork): void {
-	if (QUEUE.length > 0) drainPassivesBeforeRender();
-	const parent = QUEUE[0]?.parentNode;
-	const owner = (
-		parent?.nodeType === 9 ? parent : (parent?.ownerDocument ?? document)
-	) as VTDocument;
-	const types = VT_PENDING_TYPES;
-	VT_PENDING_TYPES = [];
-	const recs: VtRec[] = [];
-	const cancelledAnimations: Animation[] = [];
-	const warnedNames = new Set<string>();
-	const checkNames = (): void => {
-		if (process.env.NODE_ENV === 'production') return;
-		const names = new Map<string, Element>();
-		for (const rec of recs)
-			for (const el of rec.els) {
-				const name = domNode(el as HTMLElement).style?.getPropertyValue('view-transition-name');
-				if (!name || name === 'none' || name === 'auto') continue;
-				const other = names.get(name);
-				if (other !== undefined && other !== el && !warnedNames.has(name)) {
-					warnedNames.add(name);
-					console.error(
-						'Two ViewTransition boundaries use the same name in one capture: ' +
-							name +
-							'. Give simultaneously visible boundaries distinct names.',
-					);
-				}
-				names.set(name, el);
+/** Names and activation relays never cross a native capture owner. */
+function vtCheckNames(group: VtGroup): void {
+	if (process.env.NODE_ENV === 'production') return;
+	const names = new Map<string, Element>();
+	for (const rec of group.recs)
+		for (const el of rec.els) {
+			const name = domNode(el as HTMLElement).style?.getPropertyValue('view-transition-name');
+			if (!name || name === 'none' || name === 'auto') continue;
+			const other = names.get(name);
+			if (other !== undefined && other !== el && !group.warnedNames.has(name)) {
+				group.warnedNames.add(name);
+				console.error(
+					'Two ViewTransition boundaries use the same name in one capture: ' +
+						name +
+						'. Give simultaneously visible boundaries distinct names.',
+				);
 			}
-	};
-	const records = new Map<Block, VtRec>();
-	const styles = new Map<Element, VtSavedStyle>();
-	const visibleBefore = new Set<Block>();
-	for (const block of VT_REGISTRY) {
-		if (block.disposed) {
-			VT_REGISTRY.delete(block);
-			continue;
+			names.set(name, el);
 		}
-		const els = vtRangeElements(block);
-		if (els.length === 0) continue;
-		visibleBefore.add(block);
-		const rec = vtCreateRecord(block, els, styles);
-		recs.push(rec);
-		records.set(block, rec);
-	}
-	VT_DIRTY.clear();
-	VT_STATE = VT_PENDING_UPDATE;
-	VT_HANDLE = null;
-	let acts: Array<{ kind: VtActivationKind; rec: VtRec }> = [];
-	let skipRequested = false;
-	let interrupted = false;
-	let workDone = false;
-	let drainError: unknown;
-	let layoutCapture: DeferredLayoutCapture | null = null;
-	let cancelWait: (() => void) | null = null;
-	let restoreRoot: (() => void) | null = null;
-	const stage = new DOMStage(captureStagedCommitGuard);
-	const stagedCommit = beginStagedCommitCapture((action, durable) =>
-		stage.enqueue(action, durable),
-	);
-	const planned = new Map<Block, ViewTransitionProps | null>();
-	STAGED_DOM = stage;
-	VT_DRAIN = true;
-	try {
-		work();
-	} catch (error) {
-		drainError = error;
-	} finally {
-		// Resolve the finished logical tree while structural reads still use the
-		// projection. Native hosts retain the previous committed tree throughout.
-		try {
-			for (const block of VT_REGISTRY) {
-				if (!block.disposed && vtRangeElements(block).length > 0) planned.set(block, block.vt);
-			}
-		} catch (error) {
-			drainError ??= error;
-		} finally {
-			STAGED_DOM = null;
-			VT_DRAIN = false;
-			endStagedCommitCapture(stagedCommit);
-		}
-	}
+}
+
+function vtPrepareGroup(group: VtGroup, types: string[]): void {
+	const { recs, records, planned, visibleBefore } = group;
 	const appearing = new Set<string>();
 	for (const [block, props] of planned) {
 		if (!visibleBefore.has(block) && props?.name != null && props.name !== 'auto')
@@ -5907,14 +6304,344 @@ function vtFlush(work: () => void = flushWork): void {
 			vtApplyStyles(rec, cls);
 		}
 	}
-	checkNames();
-	const commit = (): MutationRecord[] => {
-		if (workDone) return [];
+	vtCheckNames(group);
+}
+
+function vtFinalizeGroup(group: VtGroup, types: string[]): void {
+	const { recs, records, styles, visibleBefore, acts, animations: cancelledAnimations } = group;
+	const owner = vtOwnerDocument(group.owner);
+	const visibleAfter = new Set<Block>();
+	const entered = new Set<Block>();
+	const changed = new Set<Block>();
+	for (const block of VT_REGISTRY) {
+		if (block.disposed || vtScopeForBlock(block) !== group.owner) continue;
+		const els = vtCaptureElements(block, group.owner);
+		if (els.length === 0) continue;
+		visibleAfter.add(block);
+		let rec = records.get(block);
+		if (rec === undefined) {
+			rec = vtCreateRecord(block, els, styles);
+			rec.nextRects = rec.rects;
+			rec.rects = [];
+			rec.oldName = '';
+			recs.push(rec);
+			records.set(block, rec);
+			entered.add(block);
+		} else {
+			const previousEls = rec.els;
+			rec.els = els;
+			rec.props = block.vt;
+			rec.name = vtGetName(block, rec.props);
+			rec.nextRects = vtMeasureElements(els);
+			if (VT_DIRTY.has(block) || vtElsChanged(previousEls, els) || vtRectChanged(rec))
+				changed.add(block);
+		}
+	}
+	const exited = (block: Block): boolean => visibleBefore.has(block) && !visibleAfter.has(block);
+	const active = new Set<Block>();
+	const shared = new Set<Block>();
+	const newClasses = new Map<Block, string>();
+	const pairedCandidates = new Set<Block>();
+	// Include named descendants inside entering units before deciding which
+	// unpaired boundaries receive ordinary enter callbacks.
+	const appearingNames = new Map<string, VtRec>();
+	for (const block of entered) {
+		const rec = records.get(block)!;
+		const name = rec.props?.name;
+		if (name != null && name !== 'auto') appearingNames.set(name, rec);
+	}
+	for (const rec of recs) {
+		if (!exited(rec.block)) continue;
+		const name = rec.props?.name;
+		const pair = name != null && name !== 'auto' ? appearingNames.get(name) : undefined;
+		if (pair === undefined) continue;
+		pairedCandidates.add(rec.block);
+		appearingNames.delete(name!);
+		if (vtResolveClass(rec.props, 'share', types) === 'none' || !vtAnyInViewport(rec.rects))
+			continue;
+		shared.add(rec.block);
+		shared.add(pair.block);
+		active.add(rec.block);
+		acts.push({ kind: 'share', rec });
+		const cls = vtResolveClass(pair.props, 'share', types);
+		if (cls !== 'none' && vtAnyInViewport(pair.nextRects!)) {
+			newClasses.set(pair.block, cls);
+			active.add(pair.block);
+		}
+	}
+	for (const rec of recs) {
+		const block = rec.block;
+		if (shared.has(block)) continue;
+		if (exited(block)) {
+			if (pairedCandidates.has(block)) continue;
+			const ancestor = vtNearestBoundaryAncestor(block);
+			if (ancestor !== null && exited(ancestor)) continue;
+			if (vtResolveClass(rec.props, 'exit', types) !== 'none' && vtAnyInViewport(rec.rects)) {
+				active.add(block);
+				acts.push({ kind: 'exit', rec });
+			}
+		} else if (entered.has(block)) {
+			const ancestor = vtNearestBoundaryAncestor(block);
+			if (ancestor !== null && entered.has(ancestor)) continue;
+			const cls = vtResolveClass(rec.props, 'enter', types);
+			if (cls !== 'none' && vtAnyInViewport(rec.nextRects!)) {
+				active.add(block);
+				newClasses.set(block, cls);
+				acts.push({ kind: 'enter', rec });
+			}
+		}
+	}
+	// A clipping ancestor must participate when a child changes even if its
+	// own rectangle is unchanged. Geometry was measured for every host.
+	for (const item of recs) {
+		const block = item.block;
+		if (!changed.has(block) && !active.has(block)) continue;
+		for (
+			let ancestor = vtNearestBoundaryAncestor(block);
+			ancestor !== null;
+			ancestor = vtNearestBoundaryAncestor(ancestor)
+		) {
+			const rec = records.get(ancestor);
+			if (
+				visibleBefore.has(ancestor) &&
+				visibleAfter.has(ancestor) &&
+				rec?.nextRects?.some((r) => r.clip)
+			)
+				changed.add(ancestor);
+		}
+	}
+	for (const block of changed) {
+		const rec = records.get(block)!;
+		if (rec.name === 'none' && rec.owner === rec.els[0]) continue;
+		const cls = vtResolveClass(rec.props, 'update', types);
+		if (cls !== 'none' && (vtAnyInViewport(rec.rects) || vtAnyInViewport(rec.nextRects!))) {
+			active.add(block);
+			newClasses.set(block, cls);
+			acts.push({ kind: 'update', rec });
+		}
+	}
+	for (const rec of recs) {
+		const block = rec.block;
+		if (shared.has(block)) continue;
+		const kind = exited(block) ? 'parent-exit' : entered.has(block) ? 'parent-enter' : null;
+		if (kind === null || !vtRelayParticipates(rec.props, kind)) continue;
+		const outer = vtRelayOutermost(
+			block,
+			kind,
+			kind === 'parent-exit' ? exited : (b) => entered.has(b),
+			types,
+		);
+		if (outer === null || shared.has(outer) || !active.has(outer)) continue;
+		if (vtRelayHasClass(rec.props, kind)) {
+			const cls = vtResolveClass(rec.props, kind, types);
+			if (cls === 'none') continue;
+			active.add(block);
+			if (kind === 'parent-enter') newClasses.set(block, cls);
+		}
+		acts.push({ kind, rec });
+	}
+	// Apply only resolved new captures. Suppressed or unchanged boundaries
+	// stay part of their surrounding snapshot instead of animating separately.
+	for (const rec of recs) {
+		const cls = newClasses.get(rec.block);
+		if (cls !== undefined) vtApplyStyles(rec, cls);
+	}
+	for (const rec of recs) {
+		if (!rec.oldCaptured || active.has(rec.block)) continue;
+		// Native scope roots retain self-participation and clipping even when
+		// only a descendant boundary activates in this capture.
+		if (rec.owner?.nodeType === 1 && rec.els[0] === rec.owner) continue;
+		let ancestor = vtNearestBoundaryAncestor(rec.block);
+		while (ancestor !== null && !active.has(ancestor))
+			ancestor = vtNearestBoundaryAncestor(ancestor);
+		if (ancestor === null) vtCancelOldCapture(rec, cancelledAnimations);
+	}
+	vtCheckNames(group);
+	const root = owner.documentElement;
+	if (
+		group.owner.nodeType === 9 &&
+		domNode(root).style.getPropertyValue('view-transition-name') === '' &&
+		typeof root.animate === 'function'
+	) {
+		domNode(root).style.setProperty('view-transition-name', 'none');
+		group.restoreRoot = () => {
+			if (domNode(root).style.getPropertyValue('view-transition-name') === 'none')
+				domNode(root).style.removeProperty('view-transition-name');
+		};
+		cancelledAnimations.push(
+			root.animate(
+				{ opacity: [0, 0], pointerEvents: ['none', 'none'] },
+				{ duration: 0, fill: 'forwards', pseudoElement: '::view-transition-group(root)' },
+			),
+		);
+		cancelledAnimations.push(
+			root.animate(
+				{ width: [0, 0], height: [0, 0] },
+				{ duration: 0, fill: 'forwards', pseudoElement: '::view-transition' },
+			),
+		);
+	}
+	if (acts.length === 0) {
+		group.skipRequested = true;
+		group.handle?.skipTransition();
+	}
+}
+
+/** One logical batch publishes once, even when several native scopes capture it. */
+function vtFlush(
+	work: () => void = flushWork,
+	queuedOwners = vtQueuedOwners(),
+	queuedBlocks: readonly Block[] = QUEUE.slice(),
+): void {
+	if (QUEUE.length > 0) drainPassivesBeforeRender();
+	const parent = QUEUE[0]?.parentNode;
+	const defaultOwner = (
+		parent?.nodeType === 9 ? parent : (parent?.ownerDocument ?? document)
+	) as VTOwner;
+	const types = VT_PENDING_TYPES;
+	VT_PENDING_TYPES = [];
+	const groups = new Map<VTOwner, VtGroup>();
+	let hasScopedBoundary = false;
+	const getGroup = (owner: VTOwner): VtGroup => {
+		let group = groups.get(owner);
+		if (group !== undefined) return group;
+		group = {
+			owner,
+			recs: [],
+			records: new Map(),
+			styles: new Map(),
+			visibleBefore: new Set(),
+			planned: new Map(),
+			acts: [],
+			animations: [],
+			cleanups: [],
+			warnedNames: new Set(),
+			handle: null,
+			session: null,
+			arrived: false,
+			settled: false,
+			interrupted: false,
+			skipRequested: false,
+			restoreRoot: null,
+			// A newly mounted/replaced scope has no old root to snapshot. Never
+			// promote its contents to a document animation as a fallback.
+			valid:
+				typeof owner.startViewTransition === 'function' &&
+				(owner.nodeType === 9 ||
+					(owner.isConnected && (owner as Element).getAttribute('vt-scope') === 'element')),
+		};
+		groups.set(owner, group);
+		return group;
+	};
+	for (const block of VT_REGISTRY) {
+		if (block.disposed) {
+			VT_REGISTRY.delete(block);
+			continue;
+		}
+		if (block.vt?.scope === 'element') hasScopedBoundary = true;
+		const owner = vtScopeForBlock(block);
+		if (owner === null || (queuedOwners !== null && !queuedOwners.has(owner))) continue;
+		const group = getGroup(owner);
+		if (!group.valid) continue;
+		const els = vtCaptureElements(block, owner);
+		if (els.length === 0) continue;
+		group.visibleBefore.add(block);
+		const rec = vtCreateRecord(block, els, group.styles);
+		group.recs.push(rec);
+		group.records.set(block, rec);
+	}
+	VT_DIRTY.clear();
+	let interrupted = false;
+	let workDone = false;
+	let updateDone = false;
+	let drainError: unknown;
+	let layoutCapture: DeferredLayoutCapture | null = null;
+	let passivesReleased = false;
+	let cancelWait: (() => void) | null = null;
+	let resolveUpdate!: () => void;
+	let rejectUpdate!: (error: unknown) => void;
+	const updateResult = new Promise<void>((resolve, reject) => {
+		resolveUpdate = resolve;
+		rejectUpdate = reject;
+	});
+	// A native start may throw before returning a consumer of this promise.
+	updateResult.catch(() => {});
+	const stage = new DOMStage(captureStagedCommitGuard);
+	const stagedCommit = beginStagedCommitCapture((action, durable) =>
+		stage.enqueue(action, durable),
+	);
+	const capture = vtBeginCapture(interrupt);
+	STAGED_DOM = stage;
+	VT_DRAIN = true;
+	try {
+		work();
+	} catch (error) {
+		drainError = error;
+	} finally {
+		try {
+			for (const block of VT_REGISTRY) {
+				if (block.disposed) continue;
+				if (block.vt?.scope === 'element') hasScopedBoundary = true;
+				const owner = vtScopeForBlock(block);
+				if (
+					owner === null ||
+					(queuedOwners !== null &&
+						!queuedOwners.has(owner) &&
+						!queuedBlocks.some((source) => blockIsAncestorOf(source, block)))
+				)
+					continue;
+				if (vtCaptureElements(block, owner).length > 0)
+					getGroup(owner).planned.set(block, block.vt);
+			}
+			for (const group of groups.values()) {
+				if (
+					group.owner.nodeType !== 9 &&
+					(!domNode(group.owner).isConnected ||
+						domNode(group.owner as Element).getAttribute('vt-scope') !== 'element')
+				)
+					group.valid = false;
+			}
+		} catch (error) {
+			drainError ??= error;
+		} finally {
+			STAGED_DOM = null;
+			VT_DRAIN = false;
+			endStagedCommitCapture(stagedCommit);
+		}
+	}
+	// Keep the document API's no-boundary skip behavior. A declaration with
+	// no usable host must not turn into this document fallback.
+	if (groups.size === 0 && !hasScopedBoundary) getGroup(defaultOwner);
+	const participants = [...groups.values()].filter(
+		(group) =>
+			group.valid && (!hasScopedBoundary || group.recs.length > 0 || group.planned.size > 0),
+	);
+	const documents = new Map<VTDocument, VtRec[]>();
+	const captureOwners = new Set(participants.map((group) => group.owner));
+	for (const group of participants) {
+		const owner = vtOwnerDocument(group.owner);
+		const recs = documents.get(owner);
+		if (recs === undefined) documents.set(owner, [...group.recs]);
+		else recs.push(...group.recs);
+	}
+	const restore = (group: VtGroup): void => {
+		vtRevertNames(group.recs);
+		group.restoreRoot?.();
+		group.restoreRoot = null;
+	};
+	const commit = (): Map<VTDocument, MutationRecord[]> => {
+		const mutations = new Map<VTDocument, MutationRecord[]>();
+		if (workDone) return mutations;
 		workDone = true;
-		vtRevertNames(recs);
-		const observe = vtObserveChanges(owner, recs);
+		for (const group of participants) restore(group);
+		const observers = [...documents].map(
+			([owner, recs]) => [owner, vtObserveChanges(owner, recs)] as const,
+		);
 		VT_DRAIN = true;
-		layoutCapture = beginDeferredLayoutCapture(() => vtInterrupt());
+		layoutCapture = beginDeferredLayoutCapture(
+			() => vtInterrupt(),
+			participants.length > 0 && !passivesReleased,
+		);
 		const previousFlush = inFlush;
 		inFlush = true;
 		beginStagedCommitPublication(stagedCommit);
@@ -5932,11 +6659,12 @@ function vtFlush(work: () => void = flushWork): void {
 			endDeferredLayoutCapture(layoutCapture);
 			VT_DRAIN = false;
 		}
-		return observe();
+		for (const [owner, observe] of observers) mutations.set(owner, observe());
+		return mutations;
 	};
 	const completeLayout = (): void => {
 		if (layoutCapture === null || layoutCapture.completed) return;
-		const observe = vtObserveChanges(owner, recs);
+		const observers = [...documents].map(([owner, recs]) => vtObserveChanges(owner, recs));
 		VT_DRAIN = true;
 		try {
 			completeDeferredLayouts(layoutCapture, interrupted);
@@ -5944,329 +6672,239 @@ function vtFlush(work: () => void = flushWork): void {
 			drainError = error;
 		} finally {
 			VT_DRAIN = false;
-			observe();
+			for (const observe of observers) observe();
 		}
 	};
-	const update = (): void | Promise<void> => {
-		if (workDone || interrupted) return;
-		const navigation = (
-			owner.defaultView as
-				(Window & { navigation?: { transition?: { finished: Promise<unknown> } | null } }) | null
-		)?.navigation?.transition;
-		const fontsWereLoaded = owner.fonts?.status === 'loaded';
+	const releasePassives = (): void => {
+		passivesReleased = true;
+		if (layoutCapture !== null) releaseDeferredPassives(layoutCapture);
+	};
+	const update = (): void => {
+		if (updateDone) return;
+		updateDone = true;
+		const before = [...documents.keys()].map((owner) => ({
+			owner,
+			fontsLoaded: owner.fonts?.status === 'loaded',
+			navigation: (
+				owner.defaultView as
+					| (Window & {
+							navigation?: { transition?: { finished: Promise<unknown> } | null };
+					  })
+					| null
+			)?.navigation?.transition,
+		}));
 		const mutations = commit();
-		const resources = vtWaitForResources(owner, fontsWereLoaded, mutations);
+		const resources: Promise<void>[] = [];
+		for (const item of before) {
+			const waiting = vtWaitForResources(
+				item.owner,
+				item.fontsLoaded,
+				mutations.get(item.owner) ?? [],
+				captureOwners,
+			);
+			if (waiting !== null) resources.push(waiting);
+		}
 		const finalize = (): void => {
-			if (interrupted) return;
-			const visibleAfter = new Set<Block>();
-			const entered = new Set<Block>();
-			const changed = new Set<Block>();
-			for (const block of VT_REGISTRY) {
-				if (block.disposed) continue;
-				const els = vtRangeElements(block);
-				if (els.length === 0) continue;
-				visibleAfter.add(block);
-				let rec = records.get(block);
-				if (rec === undefined) {
-					rec = vtCreateRecord(block, els, styles);
-					rec.nextRects = rec.rects;
-					rec.rects = [];
-					rec.oldName = '';
-					recs.push(rec);
-					records.set(block, rec);
-					entered.add(block);
-				} else {
-					const previousEls = rec.els;
-					rec.els = els;
-					rec.props = block.vt;
-					rec.name = vtGetName(block, rec.props);
-					rec.nextRects = vtMeasureElements(els);
-					if (VT_DIRTY.has(block) || vtElsChanged(previousEls, els) || vtRectChanged(rec))
-						changed.add(block);
+			if (!interrupted)
+				for (const group of participants) {
+					if (!group.interrupted && !group.settled) vtFinalizeGroup(group, types);
 				}
-			}
-			const exited = (block: Block): boolean =>
-				visibleBefore.has(block) && !visibleAfter.has(block);
-			const active = new Set<Block>();
-			const shared = new Set<Block>();
-			const newClasses = new Map<Block, string>();
-			const pairedCandidates = new Set<Block>();
-			// Include named descendants inside entering units before deciding which
-			// unpaired boundaries receive ordinary enter callbacks.
-			const appearingNames = new Map<string, VtRec>();
-			for (const block of entered) {
-				const rec = records.get(block)!;
-				const name = rec.props?.name;
-				if (name != null && name !== 'auto') appearingNames.set(name, rec);
-			}
-			for (const rec of recs) {
-				if (!exited(rec.block)) continue;
-				const name = rec.props?.name;
-				const pair = name != null && name !== 'auto' ? appearingNames.get(name) : undefined;
-				if (pair === undefined) continue;
-				pairedCandidates.add(rec.block);
-				appearingNames.delete(name!);
-				if (vtResolveClass(rec.props, 'share', types) === 'none' || !vtAnyInViewport(rec.rects))
-					continue;
-				shared.add(rec.block);
-				shared.add(pair.block);
-				active.add(rec.block);
-				acts.push({ kind: 'share', rec });
-				const cls = vtResolveClass(pair.props, 'share', types);
-				if (cls !== 'none' && vtAnyInViewport(pair.nextRects!)) {
-					newClasses.set(pair.block, cls);
-					active.add(pair.block);
-				}
-			}
-			for (const rec of recs) {
-				const block = rec.block;
-				if (shared.has(block)) continue;
-				if (exited(block)) {
-					if (pairedCandidates.has(block)) continue;
-					const ancestor = vtNearestBoundaryAncestor(block);
-					if (ancestor !== null && exited(ancestor)) continue;
-					if (vtResolveClass(rec.props, 'exit', types) !== 'none' && vtAnyInViewport(rec.rects)) {
-						active.add(block);
-						acts.push({ kind: 'exit', rec });
-					}
-				} else if (entered.has(block)) {
-					const ancestor = vtNearestBoundaryAncestor(block);
-					if (ancestor !== null && entered.has(ancestor)) continue;
-					const cls = vtResolveClass(rec.props, 'enter', types);
-					if (cls !== 'none' && vtAnyInViewport(rec.nextRects!)) {
-						active.add(block);
-						newClasses.set(block, cls);
-						acts.push({ kind: 'enter', rec });
-					}
-				}
-			}
-			// A clipping ancestor must participate when a child changes even if its
-			// own rectangle is unchanged. Geometry was measured for every host.
-			for (const item of recs) {
-				const block = item.block;
-				if (!changed.has(block) && !active.has(block)) continue;
-				for (
-					let ancestor = vtNearestBoundaryAncestor(block);
-					ancestor !== null;
-					ancestor = vtNearestBoundaryAncestor(ancestor)
-				) {
-					const rec = records.get(ancestor);
-					if (
-						visibleBefore.has(ancestor) &&
-						visibleAfter.has(ancestor) &&
-						rec?.nextRects?.some((r) => r.clip)
-					)
-						changed.add(ancestor);
-				}
-			}
-			for (const block of changed) {
-				const rec = records.get(block)!;
-				const cls = vtResolveClass(rec.props, 'update', types);
-				if (cls !== 'none' && (vtAnyInViewport(rec.rects) || vtAnyInViewport(rec.nextRects!))) {
-					active.add(block);
-					newClasses.set(block, cls);
-					acts.push({ kind: 'update', rec });
-				}
-			}
-			for (const rec of recs) {
-				const block = rec.block;
-				if (shared.has(block)) continue;
-				const kind = exited(block) ? 'parent-exit' : entered.has(block) ? 'parent-enter' : null;
-				if (kind === null || !vtRelayParticipates(rec.props, kind)) continue;
-				const outer = vtRelayOutermost(
-					block,
-					kind,
-					kind === 'parent-exit' ? exited : (b) => entered.has(b),
-					types,
-				);
-				if (outer === null || shared.has(outer) || !active.has(outer)) continue;
-				if (vtRelayHasClass(rec.props, kind)) {
-					const cls = vtResolveClass(rec.props, kind, types);
-					if (cls === 'none') continue;
-					active.add(block);
-					if (kind === 'parent-enter') newClasses.set(block, cls);
-				}
-				acts.push({ kind, rec });
-			}
-			// Apply only resolved new captures. Suppressed or unchanged boundaries
-			// stay part of their surrounding snapshot instead of animating separately.
-			for (const rec of recs) {
-				const cls = newClasses.get(rec.block);
-				if (cls !== undefined) vtApplyStyles(rec, cls);
-			}
-			for (const rec of recs) {
-				if (!rec.oldCaptured || active.has(rec.block)) continue;
-				let ancestor = vtNearestBoundaryAncestor(rec.block);
-				while (ancestor !== null && !active.has(ancestor))
-					ancestor = vtNearestBoundaryAncestor(ancestor);
-				if (ancestor === null) vtCancelOldCapture(rec, cancelledAnimations);
-			}
-			checkNames();
-			const root = owner.documentElement;
-			if (
-				domNode(root).style.getPropertyValue('view-transition-name') === '' &&
-				typeof root.animate === 'function'
-			) {
-				domNode(root).style.setProperty('view-transition-name', 'none');
-				restoreRoot = () => {
-					if (domNode(root).style.getPropertyValue('view-transition-name') === 'none')
-						domNode(root).style.removeProperty('view-transition-name');
-				};
-				cancelledAnimations.push(
-					root.animate(
-						{ opacity: [0, 0], pointerEvents: ['none', 'none'] },
-						{ duration: 0, fill: 'forwards', pseudoElement: '::view-transition-group(root)' },
-					),
-				);
-				cancelledAnimations.push(
-					root.animate(
-						{ width: [0, 0], height: [0, 0] },
-						{ duration: 0, fill: 'forwards', pseudoElement: '::view-transition' },
-					),
-				);
-			}
-			VT_STATE = VT_ANIMATING;
-			if (acts.length === 0) {
-				skipRequested = true;
-				if (VT_HANDLE !== null) VT_HANDLE.skipTransition();
-			}
 			if (drainError !== undefined) throw drainError;
 		};
 		const afterResources = (): void | Promise<void> => {
 			completeLayout();
-			if (navigation != null) return navigation.finished.then(finalize, finalize);
+			if (interrupted) return;
+			const navigation = before.flatMap((item) =>
+				item.navigation == null ? [] : [item.navigation.finished],
+			);
+			if (navigation.length > 0) return Promise.allSettled(navigation).then(finalize);
 			finalize();
 		};
-		const waiting =
-			resources !== null ? resources.then(afterResources, afterResources) : afterResources();
-		if (waiting === undefined) return;
-		return Promise.race([
-			waiting,
-			new Promise<void>((resolve) => {
-				cancelWait = resolve;
-			}),
-		]).then(() => {
-			cancelWait = null;
-		});
+		try {
+			const waiting =
+				resources.length > 0
+					? Promise.allSettled(resources).then(afterResources)
+					: afterResources();
+			if (waiting === undefined) {
+				resolveUpdate();
+				return;
+			}
+			Promise.race([
+				waiting,
+				new Promise<void>((resolve) => {
+					cancelWait = resolve;
+				}),
+			]).then(
+				() => {
+					cancelWait = null;
+					resolveUpdate();
+				},
+				(error) => {
+					cancelWait = null;
+					rejectUpdate(error);
+				},
+			);
+		} catch (error) {
+			rejectUpdate(error);
+		}
 	};
-	const restore = (): void => {
-		vtRevertNames(recs);
-		restoreRoot?.();
-		restoreRoot = null;
-	};
-	const interrupt = (): void => {
+	function interrupt(): void {
+		if (interrupted) return;
 		interrupted = true;
-		skipRequested = true;
 		cancelWait?.();
 		commit();
 		completeLayout();
-		restore();
-	};
-	VT_INTERRUPT_CURRENT = interrupt;
-	let vt: VTHandle;
-	try {
-		// Use the native options overload so :active-view-transition-type() and
-		// boundary class selection observe the same transition batch.
-		vt = owner.startViewTransition!({ update, types });
-	} catch (error) {
-		// Engines without the options overload still commit the update once.
-		// A synchronous render error remains a render error, not feature detection.
-		interrupt();
-		VT_STATE = VT_IDLE;
-		VT_INTERRUPT_CURRENT = null;
-		for (const animation of cancelledAnimations) {
-			try {
-				animation.cancel();
-			} catch (error) {
-				vtReportError(error, recs, true);
-			}
+		releasePassives();
+		for (const group of participants) {
+			group.interrupted = true;
+			group.skipRequested = true;
+			restore(group);
+			group.handle?.skipTransition();
 		}
-		vtScheduleQueuedWork();
+		resolveUpdate();
+		vtCompleteCapture(capture);
+	}
+	if (participants.length === 0) {
+		commit();
+		completeLayout();
+		resolveUpdate();
+		vtCompleteCapture(capture);
 		if (drainError !== undefined) throw drainError;
 		return;
 	}
-	VT_HANDLE = vt;
-	owner.__octaneViewTransition = vt;
-	if (skipRequested) vt.skipTransition();
-	const cleanups: Array<() => void> = [];
-	let settled = false;
-	let reportedError: unknown;
-	const report = (error: unknown): void => {
-		if (error === reportedError) return;
-		reportedError = error;
-		vtReportError(error, recs, skipRequested);
+	let pendingReady = participants.length;
+	let pendingFinished = participants.length;
+	let documentsStarted = false;
+	let elementsStarted = false;
+	const ready = (): void => {
+		if (--pendingReady === 0) vtCompleteCapture(capture);
 	};
-	vt.ready.then(
-		() => {
-			restore();
-			if (interrupted || settled) return;
-			for (const activation of acts) {
-				if (interrupted || settled) break;
-				const cleanup = vtFireCallback(activation.kind, activation.rec, types);
-				if (cleanup !== undefined) cleanups.push(cleanup);
-			}
-			// Cache native and callback-created animations now. Safari needs explicit
-			// cancellation after finished and cannot reliably enumerate them then.
-			try {
-				for (const animation of owner.documentElement.getAnimations?.({ subtree: true }) ?? []) {
-					const effect = animation.effect as (KeyframeEffect & { pseudoElement?: string }) | null;
-					if (
-						effect?.target === owner.documentElement &&
-						effect.pseudoElement?.startsWith('::view-transition')
-					) {
-						cancelledAnimations.push(animation);
-						vtPruneStaticDimensions(effect, owner);
-					}
-				}
-			} catch (error) {
-				report(error);
-			}
-		},
-		(error: unknown) => {
-			// A failed old capture may precede the browser's update callback. Finish
-			// the mutation exactly once, then leave a normal committed page.
-			commit();
-			completeLayout();
-			restore();
-			report(drainError ?? error);
-		},
-	);
-	const settle = (): void => {
-		if (settled) return;
-		settled = true;
-		restore();
-		for (const cleanup of cleanups) {
+	const finish = (group: VtGroup): void => {
+		if (group.settled) return;
+		group.settled = true;
+		restore(group);
+		for (const cleanup of group.cleanups) {
 			try {
 				cleanup();
 			} catch (error) {
-				report(error);
+				vtReportError(error, group.recs, group.skipRequested);
 			}
 		}
-		cleanups.length = 0;
-		for (const animation of cancelledAnimations) {
+		group.cleanups.length = 0;
+		for (const animation of group.animations) {
 			try {
 				animation.cancel();
 			} catch (error) {
-				report(error);
+				vtReportError(error, group.recs, group.skipRequested);
 			}
 		}
-		cancelledAnimations.length = 0;
-		if (owner.__octaneViewTransition === vt) owner.__octaneViewTransition = null;
-		if (VT_HANDLE === vt) {
-			VT_STATE = VT_IDLE;
-			VT_HANDLE = null;
-			VT_INTERRUPT_CURRENT = null;
-			if (VT_PASSIVES_HELD) {
-				VT_PASSIVES_HELD = false;
-				if (!passiveScheduled) schedulePassiveFlush();
-			}
-		}
-		vtScheduleQueuedWork();
+		group.animations.length = 0;
+		if (group.session !== null) vtFinishHandle(group.session);
+		if (--pendingFinished === 0) releasePassives();
 	};
-	vt.finished.then(settle, (error: unknown) => {
-		settle();
-		report(drainError ?? error);
-	});
+	const progress = (): void => {
+		if (!elementsStarted) return;
+		// A document callback can block a later element callback. Enter every
+		// element callback before starting documents, then publish the shared plan.
+		if (!documentsStarted) {
+			if (participants.some((group) => group.owner.nodeType !== 9 && !group.arrived)) return;
+			documentsStarted = true;
+			for (const group of participants) if (group.owner.nodeType === 9) start(group);
+		}
+		if (participants.every((group) => group.arrived)) {
+			if (participants.every((group) => group.settled)) interrupt();
+			else update();
+		}
+	};
+	const start = (group: VtGroup): void => {
+		let reportedError: unknown;
+		const report = (error: unknown): void => {
+			if (error === reportedError) return;
+			reportedError = error;
+			vtReportError(error, group.recs, group.skipRequested);
+		};
+		let handle: VTHandle;
+		try {
+			handle = group.owner.startViewTransition!({
+				types,
+				update: () => {
+					group.arrived = true;
+					progress();
+					return updateResult;
+				},
+			});
+		} catch {
+			group.arrived = true;
+			group.interrupted = true;
+			restore(group);
+			ready();
+			finish(group);
+			progress();
+			return;
+		}
+		group.handle = handle;
+		group.session = vtRegisterHandle(capture, group.owner, handle, () => {
+			group.interrupted = true;
+			group.skipRequested = true;
+			releasePassives();
+		});
+		if (group.skipRequested || interrupted) handle.skipTransition();
+		handle.ready
+			.then(
+				() => {
+					restore(group);
+					if (group.interrupted || group.settled) return;
+					for (const activation of group.acts) {
+						if (group.interrupted || group.settled) break;
+						const cleanup = vtFireCallback(activation.kind, activation.rec, types);
+						if (cleanup !== undefined) group.cleanups.push(cleanup);
+					}
+					const owner = vtOwnerDocument(group.owner);
+					const root =
+						group.owner.nodeType === 9 ? owner.documentElement : (group.owner as Element);
+					for (const animation of root.getAnimations?.({ subtree: true }) ?? []) {
+						const effect = animation.effect as (KeyframeEffect & { pseudoElement?: string }) | null;
+						if (effect?.target === root && effect.pseudoElement?.startsWith('::view-transition')) {
+							group.animations.push(animation);
+							vtPruneStaticDimensions(effect, owner);
+						}
+					}
+				},
+				(error) => {
+					group.arrived = true;
+					group.interrupted = true;
+					restore(group);
+					progress();
+					report(drainError ?? error);
+				},
+			)
+			.catch(report)
+			.then(ready);
+		handle.finished.then(
+			() => finish(group),
+			(error) => {
+				finish(group);
+				report(drainError ?? error);
+			},
+		);
+	};
+	const startCaptures = (): void => {
+		if (interrupted) return;
+		// Preparation can move a portal into an owner that was absent from the
+		// queued tree. Keep its DOM plan private until that owner is available.
+		const handles = vtActiveHandles(captureOwners);
+		if (handles.size > 0) {
+			vtWaitForHandles(handles, captureOwners);
+			Promise.allSettled([...handles].map((handle) => handle.finished)).then(startCaptures);
+			return;
+		}
+		for (const group of participants) vtPrepareGroup(group, types);
+		for (const group of participants) if (group.owner.nodeType !== 9) start(group);
+		elementsStarted = true;
+		progress();
+		if (participants.every((group) => group.settled) && drainError !== undefined) throw drainError;
+	};
+	startCaptures();
 }
 
 /** Drain pending passive effects ahead of a render pass (see flush()). */
@@ -6709,6 +7347,7 @@ interface DeferredLayoutCapture {
 	adoptions: NativeAdoptionState[];
 	passives: PendingEffect[];
 	passiveUnmounts: Array<Cleanup | TryHandler | Block | null>;
+	retainPassives: boolean;
 	onInterrupt: (() => void) | undefined;
 	pendingWork: Set<Block> | null;
 	transactions: Set<RootRenderTransaction> | null;
@@ -7172,7 +7811,10 @@ function ensureDeferredLayoutDriver(): void {
 	}
 }
 
-function beginDeferredLayoutCapture(onInterrupt?: () => void): DeferredLayoutCapture {
+function beginDeferredLayoutCapture(
+	onInterrupt?: () => void,
+	retainPassives = false,
+): DeferredLayoutCapture {
 	ensureDeferredLayoutDriver();
 	const previous = PENDING_DEFERRED_LAYOUT;
 	if (previous !== null && DEFERRED_LAYOUT_CAPTURE === null) {
@@ -7191,6 +7833,7 @@ function beginDeferredLayoutCapture(onInterrupt?: () => void): DeferredLayoutCap
 		adoptions: [],
 		passives: [],
 		passiveUnmounts: [],
+		retainPassives,
 		onInterrupt,
 		pendingWork: null,
 		transactions: null,
@@ -7257,6 +7900,12 @@ function restoreDeferredPassives(capture: DeferredLayoutCapture): void {
 		schedulePassiveFlush();
 }
 
+/** An animation batch owns its passive work without blocking unrelated commits. */
+function releaseDeferredPassives(capture: DeferredLayoutCapture): void {
+	capture.retainPassives = false;
+	if (capture.completed) restoreDeferredPassives(capture);
+}
+
 /** Accept only roots rendered synchronously by this native mutation phase. */
 function acceptDeferredRootTransactions(capture: DeferredLayoutCapture): void {
 	if (capture.transactions === null || ROOT_RENDER_TRANSACTIONS.length === 0) return;
@@ -7277,8 +7926,12 @@ function acceptDeferredRootTransactions(capture: DeferredLayoutCapture): void {
 
 /** Complete at most once, either after readiness or before interrupting work. */
 function completeDeferredLayouts(capture: DeferredLayoutCapture, interrupted = false): void {
-	if (capture.completed) return;
+	if (capture.completed) {
+		if (interrupted) releaseDeferredPassives(capture);
+		return;
+	}
 	capture.completed = true;
+	if (interrupted) capture.retainPassives = false;
 	if (PENDING_DEFERRED_LAYOUT === capture) PENDING_DEFERRED_LAYOUT = capture.parent;
 	const previousFlush = inFlush;
 	inFlush = true;
@@ -7353,7 +8006,8 @@ function completeDeferredLayouts(capture: DeferredLayoutCapture, interrupted = f
 		}
 		for (const store of capture.stores) storeSyncQueue.push(store);
 		capture.stores.length = 0;
-		restoreDeferredPassives(capture);
+		if (capture.retainPassives) captureDeferredPassives(capture);
+		else restoreDeferredPassives(capture);
 		if (!interrupted) {
 			for (const block of heldWork) {
 				if (DEFERRED_LAYOUT_HELD_WORK!.has(block) && block.pending && !block.disposed)
@@ -13242,8 +13896,16 @@ function initializeViewTransitionComponent(): ComponentBody<ViewTransitionProps>
 		function ViewTransition(props, scope) {
 			const block = scope.block;
 			ensureViewTransitionDriver().renderBoundary(block, props);
+			childSlot(scope, 0, block.parentNode, props.children, block.endMarker);
+			vtPrepareScopeBoundary(block);
 			if (props.ref != null) {
-				const instance = vtGetInstance(block);
+				const target = vtScopeForBlock(block);
+				const instance =
+					props.scope === 'element' &&
+					(props.name == null || props.name === 'auto') &&
+					target?.nodeType === 1
+						? vtScopeRefInstance(block, target as Element)
+						: vtGetInstance(block, undefined, target);
 				const ref = props.ref;
 				// A boundary ref follows its layout lifetime, including retained
 				// Activity hiding and Suspense disconnect/reconnect. Conditional
@@ -13257,7 +13919,6 @@ function initializeViewTransitionComponent(): ComponentBody<ViewTransitionProps>
 					VT_REF_SLOT,
 				);
 			}
-			childSlot(scope, 0, block.parentNode, props.children, block.endMarker);
 		},
 		COMPONENT_FLAG_BOUNDARY,
 		'ViewTransition',
@@ -16270,8 +16931,8 @@ class HydrationCapability {
 		const mode = hydrationMismatchMode(el);
 		if (mode === 1) return true;
 		const style = domNode(el as HTMLElement).style;
-		const hadStyleAttribute = domNode(el).hasAttribute('style');
-		const before = style.cssText;
+		let hadStyleAttribute = domNode(el).hasAttribute('style');
+		let before = style.cssText;
 		// A hydration write describes the COMPLETE client style, while `prev` is
 		// only the client compiler's uninitialized slot value. Diffing against that
 		// slot leaves server-only declarations behind (`{width: 1}` -> `{}` / null)
@@ -16292,10 +16953,25 @@ class HydrationCapability {
 		}
 		const expected = expectedStyle.cssText;
 		const expectsStyleAttribute = expected !== '';
+		const scopeStyle = before !== expected ? hydrationScopeStyle(el) : null;
+		if (scopeStyle !== null) {
+			const authored = domNode(document).createElement('div').style;
+			authored.cssText = scopeStyle;
+			before = authored.cssText;
+			hadStyleAttribute = domNode(el).hasAttribute('vt-scope-had-style');
+		}
 		if (before === expected && hadStyleAttribute === expectsStyleAttribute) return true;
 
 		if (expectsStyleAttribute) style.cssText = expected;
 		else domNode(el).removeAttribute('style');
+		if (scopeStyle !== null) {
+			// The author changed the hydrated style. Hand that value to the scope
+			// lease so later removal restores the client declaration, not the server's.
+			domNode(el).setAttribute('vt-scope-style', expected);
+			if (expectsStyleAttribute) domNode(el).setAttribute('vt-scope-had-style', '');
+			else domNode(el).removeAttribute('vt-scope-had-style');
+			style.setProperty('view-transition-scope', 'all', 'important');
+		}
 		if (mode === 2 && process.env.NODE_ENV !== 'production') {
 			warnHydrationValueMismatch((el as any).__oct_loc, 'style', before, expected);
 		}
@@ -18762,8 +19438,11 @@ export function setStyleProperty(
 	if (TRANSITION_JOURNAL !== null) journalAttr(el, 'style');
 	if (hiddenStyleWriter !== null && hiddenStyleWriter(el, value, previous, name)) return;
 	const style = domNode(el as HTMLElement).style;
-	if (remove) style.removeProperty(styleName(name));
-	else applyStyleProperty(el, style, name, value);
+	if (remove) {
+		const property = styleName(name);
+		style.removeProperty(property);
+		if (property === 'view-transition-scope') VIEW_TRANSITION_DRIVER?.authoredScopeStyle(el, style);
+	} else applyStyleProperty(el, style, name, value);
 }
 
 /**
@@ -18806,13 +19485,24 @@ function applyStyleValue(
 ): void {
 	if (value == null || value === false || value === '') {
 		if (prev && typeof prev === 'object') {
-			for (const key in prev) style.removeProperty(styleName(key));
-		} else if (typeof prev === 'string') style.cssText = '';
+			for (const key in prev) {
+				const property = styleName(key);
+				style.removeProperty(property);
+				if (property === 'view-transition-scope')
+					VIEW_TRANSITION_DRIVER?.authoredScopeStyle(el, style);
+			}
+		} else if (typeof prev === 'string') {
+			style.cssText = '';
+			VIEW_TRANSITION_DRIVER?.authoredScopeStyle(el, style);
+		}
 		return;
 	}
 
 	if (typeof value === 'string') {
-		if (prev !== value) style.cssText = value;
+		if (prev !== value) {
+			style.cssText = value;
+			VIEW_TRANSITION_DRIVER?.authoredScopeStyle(el, style);
+		}
 		return;
 	}
 
@@ -18821,18 +19511,30 @@ function applyStyleValue(
 	// so leftover declarations don't leak across the transition.
 	if (prev && typeof prev === 'object') {
 		for (const k in prev) {
-			if (!(k in value)) style.removeProperty(styleName(k));
+			if (!(k in value)) {
+				const property = styleName(k);
+				style.removeProperty(property);
+				if (property === 'view-transition-scope')
+					VIEW_TRANSITION_DRIVER?.authoredScopeStyle(el, style);
+			}
 		}
 		for (const k in value) {
 			const v = value[k];
 			if (v === prev[k]) continue;
 			// Booleans clear the property (React parity): `fontFamily: true` must not
 			// set the literal string "true" (a valid font name!).
-			if (v == null || typeof v === 'boolean') style.removeProperty(styleName(k));
-			else applyStyleProperty(el, style, k, v);
+			if (v == null || typeof v === 'boolean') {
+				const property = styleName(k);
+				style.removeProperty(property);
+				if (property === 'view-transition-scope')
+					VIEW_TRANSITION_DRIVER?.authoredScopeStyle(el, style);
+			} else applyStyleProperty(el, style, k, v);
 		}
 	} else {
-		if (typeof prev === 'string') style.cssText = '';
+		if (typeof prev === 'string') {
+			style.cssText = '';
+			VIEW_TRANSITION_DRIVER?.authoredScopeStyle(el, style);
+		}
 		for (const k in value) {
 			const v = value[k];
 			if (v != null && typeof v !== 'boolean') applyStyleProperty(el, style, k, v);
@@ -18873,6 +19575,7 @@ function applyStyleProperty(
 	} else {
 		style.setProperty(prop, s);
 	}
+	if (prop === 'view-transition-scope') VIEW_TRANSITION_DRIVER?.authoredScopeStyle(el, style);
 }
 
 // ---------------------------------------------------------------------------
@@ -29555,7 +30258,12 @@ function flushSuspenseRetryBatch(root: Block, batch: SuspenseRetryBatch): void {
 		}
 	};
 	// The root's complete reveal is one view transition and one lifecycle commit.
-	if (VIEW_TRANSITION_DRIVER?.wrapResume(run) !== true) run();
+	if (
+		VIEW_TRANSITION_DRIVER?.wrapResume(run, () =>
+			[...batch.states.keys()].map((state) => state.parentBlock),
+		) !== true
+	)
+		run();
 }
 
 interface HiddenDisplay {
@@ -31516,7 +32224,10 @@ function commitResume(state: TrySlot): void {
 	if (
 		!flushingStagedReveals &&
 		!flushingSuspenseRetries &&
-		VIEW_TRANSITION_DRIVER?.wrapResume(() => commitResumeInner(state)) === true
+		VIEW_TRANSITION_DRIVER?.wrapResume(
+			() => commitResumeInner(state),
+			() => [state.parentBlock],
+		) === true
 	)
 		return;
 	commitResumeInner(state);
@@ -32341,7 +33052,12 @@ function flushStagedReveals(): void {
 		// in commitResume is gated off by flushingStagedReveals). Fully captured
 		// fallback-hidden members also share the lifecycle commit above; a mixed
 		// pre-timeout batch retains the documented per-swap limitation.
-		if (VIEW_TRANSITION_DRIVER?.wrapResume(run) !== true) run();
+		if (
+			VIEW_TRANSITION_DRIVER?.wrapResume(run, () =>
+				[...STAGED_REVEALS].map((state) => state.parentBlock),
+			) !== true
+		)
+			run();
 	} finally {
 		flushingStagedReveals = false;
 	}

@@ -23,6 +23,8 @@ regressions now cover captures, CSS, interaction, readiness, and cleanup too.
 | Mutation/insertion → resource wait → layout refs/effects → navigation wait → new capture | Layout-readiness conformance and native browser suites |
 | Streaming annotations, native reveal driver, client coordination, hydration adoption | `tests/conformance/view-transition-ssr.test.ts`, native streaming coverage |
 | Error recovery and unsupported-browser fallback | Lifecycle and streaming suites |
+| Element scopes, native local pseudo targets, independent sibling/nested animations and shared capture barriers | `tests/browser/view-transition-scopes/`, native streaming coverage |
+| Scope scheduling, per-batch passive lifetime, local Suspense, invalid hosts and outside portals | `tests/view-transition-scoped-effects.test.ts` |
 | Optional-feature bundle boundaries and active-transition DOM reads | `benchmarks/view-transitions/` |
 
 ## Architecture
@@ -43,10 +45,18 @@ boundary's visible top-level hosts contribute geometry; layout changes can
 activate clipping ancestors. Temporary capture styles are restored before
 mutation publication and again after the new capture.
 
-The client and optional streaming driver share a document handle. Later
-transition work waits for its completion; urgent work skips it. Callback cleanup
-and explicit animation cancellation belong to that handle and survive boundary
-unmount. Identity checks prevent an old completion from clearing a newer handle.
+The client and optional streaming driver share the actual native document handle
+and a lazily allocated map of element handles. A batch prepares and publishes once.
+Element native callbacks enter before a document capture starts, preventing a
+document callback from blocking an element callback needed by the same batch.
+The preparation lock lasts through every participant's `ready` settlement. After
+that, independent scopes can animate concurrently. A queued ancestor waits for
+active scopes it could replace; local work can proceed in another scope.
+
+Callback cleanup and explicit animation cancellation belong to each native
+handle and survive boundary unmount. Passive work belongs to the shared commit
+and is released when its animations finish or that commit is interrupted.
+Identity checks prevent an old completion from clearing a newer handle.
 
 ## Deliberate scope limits
 
@@ -54,8 +64,8 @@ unmount. Identity checks prevent an old completion from clearing a newer handle.
 - React Server Components, class components, and React Native are outside
   Octane's supported rendering model.
 - Reduced-motion behavior remains application CSS, as in React.
-- Element-scoped native transitions are a separate feature; this compatibility
-  change uses document transitions and does not add a new scope prop.
+- `scope="element"` is an Octane extension, with document behavior remaining the
+  default. Unsupported or invalid element scopes commit without animation.
 - Keyed reconciliation retains Octane's LIS algorithm. Only ViewTransition
   preparation uses staged DOM publication.
 

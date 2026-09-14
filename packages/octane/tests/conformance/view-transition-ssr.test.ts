@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { compile } from 'octane/compiler';
-import { hydrateRoot } from '../../src/index.js';
+import { act, hydrateRoot, startTransition, type ViewTransitionInstance } from '../../src/index.js';
 import * as ServerRT from '../../src/server/index.js';
 // CLIENT-compiled fixture (for hydration).
 import {
@@ -18,6 +18,10 @@ import {
 	DualApp,
 	OutsideApp,
 	RelayApp,
+	ScopedStylesApp,
+	SameHostScopesApp,
+	StaticScopeStyleApp,
+	ScopedRefNameApp,
 } from './_fixtures/view-transition-ssr.tsrx';
 
 const FIXTURE = join(
@@ -74,14 +78,16 @@ const vt = (el: Element | null) => {
 	return out;
 };
 
-function mockNativeTransitions() {
+function mockNativeTransitions(elements = false) {
 	const frames: Array<{
+		owner: Document | Element;
 		update: () => unknown;
 		ready: () => void;
 		finish: () => void;
 		skip: () => void;
 	}> = [];
 	const previous = document.startViewTransition;
+	const previousElement = Object.getOwnPropertyDescriptor(Element.prototype, 'startViewTransition');
 	const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
 		x: 0,
 		y: 0,
@@ -93,7 +99,7 @@ function mockNativeTransitions() {
 		height: 20,
 		toJSON() {},
 	});
-	(document as any).startViewTransition = (options: { update: () => unknown }) => {
+	function start(this: Document | Element, options: { update: () => unknown }) {
 		let ready!: () => void, reject!: (error: unknown) => void, finish!: () => void;
 		const result = {
 			ready: new Promise<void>((resolve, rejectReady) => {
@@ -109,13 +115,28 @@ function mockNativeTransitions() {
 				finish();
 			},
 		};
-		frames.push({ update: options.update, ready, finish, skip: result.skipTransition });
+		frames.push({
+			owner: this,
+			update: options.update,
+			ready,
+			finish,
+			skip: result.skipTransition,
+		});
 		return result;
-	};
+	}
+	(document as any).startViewTransition = start;
+	if (elements)
+		Object.defineProperty(Element.prototype, 'startViewTransition', {
+			configurable: true,
+			value: start,
+		});
 	return {
 		frames,
 		restore() {
 			(document as any).startViewTransition = previous;
+			if (previousElement)
+				Object.defineProperty(Element.prototype, 'startViewTransition', previousElement);
+			else delete (Element.prototype as any).startViewTransition;
 			rect.mockRestore();
 		},
 	};
@@ -139,6 +160,7 @@ describe('ReactDOMFizzViewTransition (ported)', () => {
 		delete (window as any).$OCTRX;
 		delete (window as any).$OCTVT;
 		delete (document as any).__octaneViewTransition;
+		delete (document as any).__octaneViewTransitionScopes;
 	});
 
 	// Per ReactDOMFizzViewTransition-test.js:99
@@ -480,6 +502,354 @@ describe('ReactDOMFizzViewTransition (ported)', () => {
 			native.restore();
 		}
 	});
+
+	it('captures sibling element scopes independently before revealing either stream', async () => {
+		const native = mockNativeTransitions(true);
+		try {
+			for (const id of ['left-scope', 'right-scope']) {
+				const d = deferred<string>();
+				const c = collector();
+				ServerRT.renderToPipeableStream(server.ScopedStreamApp, { id, promise: d.promise }).pipe(
+					c.dest,
+				);
+				d.resolve(id);
+				await c.ended;
+				const carrier = document.createElement('div');
+				carrier.innerHTML = c.chunks.join('');
+				container.appendChild(carrier);
+			}
+			activate(container);
+			await Promise.resolve();
+			expect(native.frames.map((frame) => (frame.owner as Element).id)).toEqual([
+				'left-scope',
+				'right-scope',
+			]);
+			const scopes = Array.from(
+				container.querySelectorAll<HTMLElement>('#left-scope, #right-scope'),
+			);
+			for (const scope of scopes) {
+				expect(scope.style.getPropertyValue('view-transition-scope')).toBe('all');
+				expect(scope.querySelector<HTMLElement>('#wave-old')!.style.viewTransitionName).toBe(
+					'wave-hero',
+				);
+			}
+			native.frames[0].update();
+			expect(scopes.every((scope) => scope.querySelector('#wave-old'))).toBe(true);
+			native.frames[1].update();
+			for (const scope of scopes) {
+				expect(scope.querySelector('#wave-old')).toBeNull();
+				expect(scope.querySelector('#wave-new')!.textContent).toBe(scope.id);
+			}
+			for (const frame of native.frames) {
+				frame.ready();
+				frame.finish();
+			}
+			await Promise.resolve();
+		} finally {
+			native.restore();
+		}
+	});
+
+	it('keeps nested streamed scopes in separate native captures', async () => {
+		const native = mockNativeTransitions(true);
+		try {
+			const d = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.NestedScopedStreamApp, { promise: d.promise }).pipe(
+				c.dest,
+			);
+			d.resolve('Content');
+			await c.ended;
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			await Promise.resolve();
+			expect(native.frames.map((frame) => (frame.owner as Element).id)).toEqual([
+				'outer-scope',
+				'inner-scope',
+			]);
+			for (const frame of native.frames) frame.update();
+			expect(container.querySelector('#outer-content')!.textContent).toBe('Content');
+			expect(container.querySelector('#wave-new')!.textContent).toBe('Content');
+			for (const frame of native.frames) {
+				frame.ready();
+				frame.finish();
+			}
+			await Promise.resolve();
+		} finally {
+			native.restore();
+		}
+	});
+
+	it.each(['', 'scope-css', 'none'])(
+		'preserves the authored inline name of a streamed scope root (%s)',
+		async (name) => {
+			const native = mockNativeTransitions(true);
+			try {
+				const value = deferred<string>();
+				const c = collector();
+				ServerRT.renderToPipeableStream(server.ScopedStreamApp, {
+					id: 'named-scope',
+					promise: value.promise,
+					style: name ? 'view-transition-name:' + name : undefined,
+				}).pipe(c.dest);
+				value.resolve('Content');
+				await c.ended;
+				container.innerHTML = c.chunks.join('');
+				activate(container);
+				await Promise.resolve();
+				const host = container.querySelector<HTMLElement>('#named-scope')!;
+				expect(native.frames).toHaveLength(1);
+				expect(native.frames[0].owner).toBe(host);
+				expect(host.style.getPropertyValue('view-transition-name')).toBe(name);
+				native.frames[0].update();
+				native.frames[0].ready();
+				native.frames[0].finish();
+				await Promise.resolve();
+			} finally {
+				native.restore();
+			}
+		},
+	);
+
+	it('queues another reveal for its active scope while an independent stream proceeds', async () => {
+		const native = mockNativeTransitions(true);
+		try {
+			const first = deferred<string>();
+			const second = deferred<string>();
+			const c = collector();
+			ServerRT.renderToPipeableStream(server.ScopedTwoWaveApp, {
+				first: first.promise,
+				second: second.promise,
+			}).pipe(c.dest);
+			container.innerHTML = c.chunks.join('');
+			activate(container);
+			let emitted = c.chunks.length;
+			first.resolve('First');
+			await vi.waitFor(() => expect(c.chunks.length).toBeGreaterThan(emitted));
+			const append = (html: string) => {
+				const carrier = document.createElement('div');
+				carrier.innerHTML = html;
+				container.appendChild(carrier);
+				activate(carrier);
+			};
+			append(c.chunks.slice(emitted).join(''));
+			await Promise.resolve();
+			emitted = c.chunks.length;
+			expect(native.frames.map((frame) => (frame.owner as Element).id)).toEqual(['queued-scope']);
+			native.frames[0].update();
+			native.frames[0].ready();
+			second.resolve('Second');
+			await c.ended;
+			append(c.chunks.slice(emitted).join(''));
+			await Promise.resolve();
+			expect(native.frames).toHaveLength(1);
+			const other = deferred<string>();
+			const otherCollector = collector();
+			ServerRT.renderToPipeableStream(server.ScopedStreamApp, {
+				id: 'independent-scope',
+				promise: other.promise,
+			}).pipe(otherCollector.dest);
+			other.resolve('Independent');
+			await otherCollector.ended;
+			append(otherCollector.chunks.join(''));
+			await Promise.resolve();
+			expect(native.frames.map((frame) => (frame.owner as Element).id)).toEqual([
+				'queued-scope',
+				'independent-scope',
+			]);
+			native.frames[1].update();
+			expect(container.querySelector('#wave-new')!.textContent).toBe('Independent');
+			expect(container.querySelector('#second-wave')).toBeNull();
+			native.frames[0].finish();
+			await Promise.resolve();
+			expect(native.frames.map((frame) => (frame.owner as Element).id)).toEqual([
+				'queued-scope',
+				'independent-scope',
+				'queued-scope',
+			]);
+			native.frames[2].update();
+			expect(container.querySelector('#second-wave')!.textContent).toBe('Second');
+			for (const frame of native.frames.slice(1)) {
+				frame.ready();
+				frame.finish();
+			}
+			await Promise.resolve();
+		} finally {
+			native.restore();
+		}
+	});
+
+	it('adopts SSR scope style ownership and restores the authored scope property on removal', async () => {
+		const props = {
+			scope: 'element' as 'element' | undefined,
+			title: 'quoted style="not a style attribute"',
+			style: 'color:red;view-transition-scope:none!important',
+			text: 'Server',
+		};
+		container.innerHTML = ServerRT.renderToString(server.ScopedStylesApp, props).html;
+		const host = container.querySelector<HTMLElement>('#scope-styles')!;
+		expect(host.title).toBe(props.title);
+		const root = hydrateRoot(container, ScopedStylesApp, props);
+		try {
+			expect(container.querySelector('#scope-styles')).toBe(host);
+			expect(host.style.getPropertyValue('view-transition-scope')).toBe('all');
+			expect(host.style.getPropertyPriority('view-transition-scope')).toBe('important');
+			host.style.color = 'blue';
+			await act(() => root.render(ScopedStylesApp, { ...props, scope: undefined, text: 'Client' }));
+			expect(container.querySelector('#scope-styles')).toBe(host);
+			expect(host.textContent).toBe('Client');
+			expect(host.style.getPropertyValue('view-transition-scope')).toBe('none');
+			expect(host.style.getPropertyPriority('view-transition-scope')).toBe('important');
+			expect(host.style.color).toBe('blue');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('retains an authored scope value that becomes equal to the owned declaration', async () => {
+		const props = {
+			scope: 'element' as 'element' | undefined,
+			style: 'view-transition-scope:none!important',
+			text: 'First',
+		};
+		container.innerHTML = ServerRT.renderToString(server.ScopedStylesApp, props).html;
+		const root = hydrateRoot(container, ScopedStylesApp, props);
+		try {
+			const host = container.querySelector<HTMLElement>('#scope-styles')!;
+			const authored = { ...props, style: 'view-transition-scope:all!important', text: 'Second' };
+			await act(() => root.render(ScopedStylesApp, authored));
+			await act(() => root.render(ScopedStylesApp, { ...authored, scope: undefined }));
+			expect(host.style.getPropertyValue('view-transition-scope')).toBe('all');
+			expect(host.style.getPropertyPriority('view-transition-scope')).toBe('important');
+		} finally {
+			root.unmount();
+		}
+	});
+
+	it('switches a live scoped ref to an equal explicit name with its own layout lifetime', async () => {
+		const connected: ViewTransitionInstance[] = [];
+		const cleaned: ViewTransitionInstance[] = [];
+		const reference = (instance: ViewTransitionInstance | null) => {
+			if (instance === null) return;
+			connected.push(instance);
+			return () => {
+				cleaned.push(instance);
+			};
+		};
+		container.innerHTML = ServerRT.renderToString(server.ScopedRefNameApp, { reference }).html;
+		const root = hydrateRoot(container, ScopedRefNameApp, { reference });
+		try {
+			await act(() => {});
+			const host = container.querySelector<HTMLElement>('#scope-ref-name')!;
+			const live = connected[0];
+			expect(live.name).toBe('hero');
+			await act(() => root.render(ScopedRefNameApp, { reference, name: 'hero' }));
+			expect(connected).toHaveLength(2);
+			expect(cleaned).toEqual([live]);
+			const fixed = connected[1];
+			expect(fixed).not.toBe(live);
+			host.style.viewTransitionName = 'card';
+			expect(live.name).toBe('card');
+			expect(live.group.selector).toBe('::view-transition-group(card)');
+			expect(fixed.name).toBe('hero');
+			expect(fixed.group.selector).toBe('::view-transition-group(hero)');
+		} finally {
+			root.unmount();
+		}
+		expect(cleaned).toEqual(connected);
+	});
+
+	it.each([false, true])(
+		'checks authored static scope styles during hydration (mismatch=%s)',
+		(mismatch) => {
+			container.innerHTML = ServerRT.renderToString(server.StaticScopeStyleApp, {}).html;
+			const host = container.querySelector<HTMLElement>('#static-scope-style')!;
+			if (mismatch) host.style.color = 'blue';
+			const root = hydrateRoot(container, StaticScopeStyleApp, {});
+			try {
+				const hydrated = container.querySelector<HTMLElement>('#static-scope-style')!;
+				expect(hydrated === host).toBe(!mismatch);
+				expect(hydrated.style.color).toBe('red');
+				expect(hydrated.style.getPropertyValue('view-transition-scope')).toBe('all');
+				expect(hydrated.style.getPropertyPriority('view-transition-scope')).toBe('important');
+			} finally {
+				root.unmount();
+				if (mismatch) errorSpy.mockClear();
+			}
+		},
+	);
+
+	it('keeps a shared scope host owned when one nested declaration is removed', async () => {
+		const native = mockNativeTransitions(true);
+		const updates: string[] = [];
+		const props = {
+			outer: 'element' as 'element' | undefined,
+			inner: 'element' as 'element' | undefined,
+			text: 'First',
+			style: 'view-transition-scope:none!important',
+			onUpdate: () => {
+				updates.push('update');
+			},
+		};
+		container.innerHTML = ServerRT.renderToString(server.SameHostScopesApp, props).html;
+		const root = hydrateRoot(container, SameHostScopesApp, props);
+		try {
+			const host = container.querySelector<HTMLElement>('#same-host-scope')!;
+			const retained = { ...props, outer: undefined };
+			await act(() => root.render(SameHostScopesApp, retained));
+			startTransition(() => root.render(SameHostScopesApp, { ...retained, text: 'Second' }));
+			await vi.waitFor(() => expect(native.frames).toHaveLength(1));
+			expect(native.frames[0].owner).toBe(host);
+			await native.frames[0].update();
+			native.frames[0].ready();
+			native.frames[0].finish();
+			await vi.waitFor(() => expect(updates).toEqual(['update']));
+			expect(container.querySelector('#same-host-scope')).toBe(host);
+			await act(() => root.render(SameHostScopesApp, { ...retained, inner: undefined }));
+			expect(host.style.getPropertyValue('view-transition-scope')).toBe('none');
+			expect(host.style.getPropertyPriority('view-transition-scope')).toBe('important');
+		} finally {
+			root.unmount();
+			native.restore();
+		}
+	});
+
+	it.each([
+		'ScopedStreamApp',
+		'ReplacedScopedStreamApp',
+		'MultipleScopedStreamApp',
+		'TextScopedStreamApp',
+		'ResourceScopedStreamApp',
+	])(
+		'commits %s without document animation when its element scope is unavailable',
+		async (name) => {
+			const native = mockNativeTransitions(name !== 'ScopedStreamApp');
+			try {
+				const d = deferred<string>();
+				const c = collector();
+				ServerRT.renderToPipeableStream(server[name], {
+					promise: d.promise,
+					id: 'unsupported-scope',
+				}).pipe(c.dest);
+				d.resolve('Content');
+				await c.ended;
+				container.innerHTML = c.chunks.join('');
+				if (name === 'ReplacedScopedStreamApp')
+					expect(
+						container
+							.querySelector<HTMLElement>('#old-scope')!
+							.style.getPropertyValue('view-transition-scope'),
+					).toBe('');
+				activate(container);
+				await Promise.resolve();
+				expect(native.frames).toHaveLength(0);
+				expect(container.textContent).toContain('Content');
+				expect(container.textContent).not.toContain('Loading');
+			} finally {
+				native.restore();
+			}
+		},
+	);
 
 	it('installs the animation driver when the first ViewTransition arrives in a later wave', async () => {
 		const native = mockNativeTransitions();

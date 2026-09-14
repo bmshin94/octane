@@ -1,4 +1,18 @@
-import { ViewTransition, use } from 'octane';
+import { ViewTransition, use, type ViewTransitionProps } from 'octane';
+
+interface StreamProps {
+	promise: Promise<string>;
+}
+interface RelayProps extends StreamProps {
+	relay?: string;
+	handler?: () => void;
+}
+interface StreamTextProps extends StreamProps {
+	id: string;
+	styled?: boolean;
+	style?: string;
+	name?: string;
+}
 
 // Fixtures for conformance/view-transition-ssr.test.ts — ports of
 // facebook/react ReactDOMFizzViewTransition-test.js (the test file carries
@@ -6,7 +20,7 @@ import { ViewTransition, use } from 'octane';
 // the same Suspense tryBlock React drives with <Suspense>.
 
 // :100 — the four annotation shapes (no Suspense involved).
-export function AnnotationsApp(props) @{
+export function AnnotationsApp(props: {}) @{
 	<div>
 		<ViewTransition>
 			<div />
@@ -27,7 +41,7 @@ export function AnnotationsApp(props) @{
 
 // The resolved-content shape shared by the streaming fixtures (React's
 // resolve(<div><ViewTransition><span>Content</span></ViewTransition></div>)).
-export function ArmsContent(props) @{
+export function ArmsContent(props: StreamProps) @{
 	const text = use(props.promise) as string;
 	<div>
 		<ViewTransition>
@@ -38,7 +52,7 @@ export function ArmsContent(props) @{
 
 // :148 — enter/exit annotations for boundaries inside Suspense: the fallback
 // root exits on reveal; the content root enters when streamed in.
-export function ArmsApp(props) @{
+export function ArmsApp(props: StreamProps) @{
 	<div>
 		<>
 			@try {
@@ -61,7 +75,7 @@ export function ArmsApp(props) @{
 // :213 — both enter AND exit on the same node: the fallback's boundary is
 // itself Suspense CONTENT (of an inner, non-suspending @try) sitting inside
 // the outer FALLBACK arm.
-export function DualApp(props) @{
+export function DualApp(props: StreamProps) @{
 	<div>
 		<>
 			@try {
@@ -90,7 +104,7 @@ export function DualApp(props) @{
 // :280 — a boundary OUTSIDE (wrapping) the Suspense: it pairs the fallback
 // and content across the swap, so both captures carry the same auto
 // vt-name + vt-share.
-export function OutsideApp(props) @{
+export function OutsideApp(props: StreamProps) @{
 	<div>
 		<ViewTransition>
 			<>
@@ -108,7 +122,7 @@ export function OutsideApp(props) @{
 	</div>
 }
 
-export function RelayContent(props) @{
+export function RelayContent(props: RelayProps) @{
 	const text = use(props.promise) as string;
 	<div id="content">
 		<ViewTransition parentEnter={props.relay} onParentEnter={props.handler}>
@@ -121,7 +135,7 @@ export function RelayContent(props) @{
 	</div>
 }
 
-export function RelayApp(props) @{
+export function RelayApp(props: RelayProps) @{
 	<div>
 		<>
 			@try {
@@ -145,7 +159,7 @@ export function RelayApp(props) @{
 	</div>
 }
 
-export function MultipleHostsApp(props) @{
+export function MultipleHostsApp(props: {}) @{
 	<div>
 		<ViewTransition name="siblings" update="resize">
 			<>
@@ -159,7 +173,7 @@ export function MultipleHostsApp(props) @{
 	</div>
 }
 
-export function OutsideClassesApp(props) @{
+export function OutsideClassesApp(props: StreamProps) @{
 	<div>
 		<ViewTransition name="outer-classes" update="resize" share="shared">
 			<>
@@ -173,7 +187,7 @@ export function OutsideClassesApp(props) @{
 	</div>
 }
 
-export function StreamTextContent(props) @{
+export function StreamTextContent(props: StreamTextProps) @{
 	const text = use(props.promise) as string;
 	<div
 		id={props.id}
@@ -183,7 +197,7 @@ export function StreamTextContent(props) @{
 	>{text}</div>
 }
 
-export function StreamTextApp(props) @{
+export function StreamTextApp(props: StreamTextProps) @{
 	<section>
 		<>
 			@try {
@@ -199,7 +213,7 @@ export function StreamTextApp(props) @{
 	</section>
 }
 
-export function StreamResourceContent(props) @{
+export function StreamResourceContent(props: StreamProps) @{
 	const text = use(props.promise) as string;
 	<div>
 		<span>{text}</span>
@@ -208,7 +222,7 @@ export function StreamResourceContent(props) @{
 	</div>
 }
 
-export function StreamResourceApp(props) @{
+export function StreamResourceApp(props: StreamProps) @{
 	<section>
 		<>
 			@try {
@@ -224,7 +238,7 @@ export function StreamResourceApp(props) @{
 	</section>
 }
 
-export function SharedWaveApp(props) @{
+export function SharedWaveApp(props: StreamProps) @{
 	<section>
 		<>
 			@try {
@@ -245,14 +259,14 @@ export function SharedWaveApp(props) @{
 	</section>
 }
 
-function LateViewContent(props) @{
+function LateViewContent(props: StreamProps) @{
 	const text = use(props.promise) as string;
 	<ViewTransition enter="late-enter">
 		<div id="late-content">{text}</div>
 	</ViewTransition>
 }
 
-export function LateViewApp(props) @{
+export function LateViewApp(props: StreamProps) @{
 	<section>
 		@try {
 			<LateViewContent promise={props.promise} />
@@ -260,4 +274,121 @@ export function LateViewApp(props) @{
 			<p>{'Loading'}</p>
 		}
 	</section>
+}
+
+export function ScopedStreamApp(props: StreamTextProps) @{
+	<ViewTransition scope="element" name={props.name} update="scope-update">
+		<section id={props.id} style={props.style}>
+			<SharedWaveApp promise={props.promise} />
+		</section>
+	</ViewTransition>
+}
+
+export function NestedScopedStreamApp(props: StreamProps) @{
+	<ViewTransition scope="element" update="outer-update">
+		<section id="outer-scope">
+			<StreamTextApp promise={props.promise} id="outer-content" />
+			<ScopedStreamApp promise={props.promise} id="inner-scope" />
+		</section>
+	</ViewTransition>
+}
+
+export function ReplacedScopedStreamApp(props: StreamProps) @{
+	<ViewTransition scope="element">
+		@try {
+			<StreamTextContent promise={props.promise} id="replaced-scope" />
+		} @pending {
+			<p id="old-scope">{'Loading'}</p>
+		}
+	</ViewTransition>
+}
+
+export function MultipleScopedStreamApp(props: StreamProps) @{
+	<ViewTransition scope="element">
+		<>
+			<section>
+				<StreamTextApp promise={props.promise} id="multiple-content" />
+			</section>
+			<aside>{'Sibling'}</aside>
+		</>
+	</ViewTransition>
+}
+
+export function TextScopedStreamApp(props: StreamProps) @{
+	<ViewTransition scope="element">
+		<>
+			{'Outside'}
+			<section>
+				<StreamTextApp promise={props.promise} id="text-content" />
+			</section>
+		</>
+	</ViewTransition>
+}
+
+export function ResourceScopedStreamApp(props: StreamProps) @{
+	<ViewTransition scope="element">
+		<>
+			<section>
+				<StreamTextApp promise={props.promise} id="resource-content" />
+			</section>
+			<script type="application/json">
+				{
+					('{"ready":true}');
+				}
+			</script>
+		</>
+	</ViewTransition>
+}
+
+export function ScopedTwoWaveApp(props: { first: Promise<string>; second: Promise<string> }) @{
+	<ViewTransition scope="element">
+		<section id="queued-scope">
+			<StreamTextApp promise={props.first} id="first-wave" />
+			<StreamTextApp promise={props.second} id="second-wave" />
+		</section>
+	</ViewTransition>
+}
+
+export function ScopedStylesApp(props: {
+	scope?: 'element';
+	title?: string;
+	style?: string;
+	text: string;
+}) @{
+	<ViewTransition scope={props.scope}>
+		<section
+			id="scope-styles"
+			title={props.title}
+			style={props.style}
+		>{props.text as string}</section>
+	</ViewTransition>
+}
+
+export function SameHostScopesApp(props: {
+	outer?: 'element';
+	inner?: 'element';
+	text: string;
+	style: string;
+	onUpdate?: () => void;
+}) @{
+	<ViewTransition scope={props.outer}>
+		<ViewTransition scope={props.inner} onUpdate={props.onUpdate}>
+			<section id="same-host-scope" style={props.style}>{props.text}</section>
+		</ViewTransition>
+	</ViewTransition>
+}
+
+export function StaticScopeStyleApp() @{
+	<ViewTransition scope="element">
+		<section
+			id="static-scope-style"
+			style="color:red;view-transition-scope:none!important"
+		>{'Static'}</section>
+	</ViewTransition>
+}
+
+export function ScopedRefNameApp(props: { name?: string; reference: ViewTransitionProps['ref'] }) @{
+	<ViewTransition scope="element" name={props.name} ref={props.reference}>
+		<section id="scope-ref-name" style="view-transition-name:hero">{'Content'}</section>
+	</ViewTransition>
 }

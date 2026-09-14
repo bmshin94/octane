@@ -11,4 +11,8 @@ Animate streamed Suspense reveals with coordinated hydration and client updates.
 
 Prepare ViewTransition renders with staged DOM commits so snapshot naming uses the finished boundary props while preserving existing node identity and committed lifecycle visibility.
 
+Add opt-in `scope="element"` boundaries with local names and pseudo-element handles,
+independent sibling and nested animations, coordinated streamed reveals, and
+normal DOM commits when native element transitions are unavailable.
+
 Expose the ViewTransition bundle and native-work benchmark through the MCP benchmark tools.

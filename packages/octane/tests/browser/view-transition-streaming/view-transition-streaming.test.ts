@@ -41,25 +41,38 @@ section, #fallback, #content { min-height: 80px; width: 240px; }
 ::view-transition-group(*.resize) { --stream-capture-class: resize; }
 </style><main>${shell}</main>`);
 	await page.evaluate(() => {
-		const native = document.startViewTransition.bind(document);
 		const records: any[] = [];
-		const snapshot = () =>
+		const snapshot = (owner: Document | Element) =>
 			Object.fromEntries(
-				Array.from(document.querySelectorAll<HTMLElement>('[id]'))
+				Array.from(owner.querySelectorAll<HTMLElement>('[id]'))
 					.filter((el) => !el.closest('[hidden]'))
 					.map((el) => [
 						el.id,
 						{ name: el.style.viewTransitionName, className: el.style.viewTransitionClass },
 					]),
 			);
-		(document as any).startViewTransition = (options: any) => {
-			const record: any = { old: snapshot() };
-			record.handle = native(options);
+		function capture(owner: Document | Element, native: (options: any) => any, options: any) {
+			const record: any = {
+				owner: owner === document ? 'document' : (owner as Element).id,
+				old: snapshot(owner),
+			};
+			record.handle = native({
+				...options,
+				update() {
+					record.entered = true;
+					return options.update();
+				},
+			});
+			record.handle.finished.then(() => {
+				record.finished = true;
+			});
 			record.handle.ready.then(
 				() => {
-					record.new = snapshot();
-					record.animations = document
-						.getAnimations()
+					const target = owner === document ? document.documentElement : (owner as Element);
+					record.new = snapshot(owner);
+					record.animations = target
+						.getAnimations({ subtree: true })
+						.filter((animation) => (animation.effect as KeyframeEffect | null)?.target === target)
 						.map((animation) => (animation.effect as KeyframeEffect | null)?.pseudoElement)
 						.filter(Boolean);
 					record.sharedClass = getComputedStyle(
@@ -73,7 +86,15 @@ section, #fallback, #content { min-height: 80px; width: 240px; }
 			);
 			records.push(record);
 			return record.handle;
-		};
+		}
+		const documentNative = document.startViewTransition.bind(document);
+		(document as any).startViewTransition = (options: any) =>
+			capture(document, documentNative, options);
+		const elementNative = (Element.prototype as any).startViewTransition;
+		if (elementNative)
+			(Element.prototype as any).startViewTransition = function (options: any) {
+				return capture(this, elementNative.bind(this), options);
+			};
 		(window as any).__streamCaptures = records;
 	});
 	await page.evaluate(
@@ -104,7 +125,8 @@ async function settle(page: Page, count = 1) {
 	return page.evaluate(async () => {
 		const records = (window as any).__streamCaptures;
 		await Promise.all(records.map((record: any) => record.handle.finished));
-		return records.map(({ old, new: next, animations, sharedClass, error }: any) => ({
+		return records.map(({ owner, old, new: next, animations, sharedClass, error }: any) => ({
+			owner,
 			old,
 			next,
 			animations,
@@ -115,6 +137,149 @@ async function settle(page: Page, count = 1) {
 }
 
 describe.sequential('native streaming ViewTransition capture', () => {
+	it.each([
+		{ css: '', expected: 'root', name: undefined },
+		{ css: 'view-transition-name:scope-css;', expected: 'scope-css', name: undefined },
+		{ css: 'view-transition-name:none;', expected: null, name: undefined },
+		{ css: 'view-transition-name:none;', expected: 'scope-explicit', name: 'scope-explicit' },
+	])('honors the native scope root name ($expected)', async ({ css, expected, name }) => {
+		const html = await streamed('ScopedStreamApp', { id: 'named-scope', name });
+		const { page, errors } = await open(html.shell);
+		try {
+			if (css) await page.addStyleTag({ content: '#named-scope {' + css + '}' });
+			await reveal(page, html.reveal);
+			const [capture] = await settle(page);
+			expect(capture.owner).toBe('named-scope');
+			expect(capture.error).toBeUndefined();
+			const groups = capture.animations.filter((name: string) =>
+				name.startsWith('::view-transition-group('),
+			);
+			expect(groups).toContain('::view-transition-group(wave-hero)');
+			if (expected === null) expect(groups).toEqual(['::view-transition-group(wave-hero)']);
+			else expect(groups).toContain('::view-transition-group(' + expected + ')');
+			expect(errors).toEqual([]);
+		} finally {
+			await page.close();
+		}
+	});
+
+	it('runs sibling stream scopes with identical shared names and keeps an outside control interactive', async () => {
+		const left = await streamed('ScopedStreamApp', {
+			id: 'left-scope',
+			style: 'view-transition-scope:none!important',
+		});
+		const right = await streamed('ScopedStreamApp', {
+			id: 'right-scope',
+			style: 'color:red;view-transition-scope:none!important',
+		});
+		const { page, errors } = await open(
+			left.shell + right.shell + '<button id="outside-control">Outside</button>',
+		);
+		try {
+			expect(
+				await page.locator('#left-scope, #right-scope').evaluateAll((elements) =>
+					elements.map((el) => ({
+						value: getComputedStyle(el).getPropertyValue('view-transition-scope'),
+						priority: (el as HTMLElement).style.getPropertyPriority('view-transition-scope'),
+					})),
+				),
+			).toEqual([
+				{ value: 'all', priority: 'important' },
+				{ value: 'all', priority: 'important' },
+			]);
+			await page.addStyleTag({
+				content: '::view-transition-group(*) { animation-duration: 600ms; }',
+			});
+			await page.evaluate(() => {
+				document.querySelector('#outside-control')!.addEventListener('click', () => {
+					(window as any).__clickedDuringScopes = (window as any).__streamCaptures.filter(
+						(record: any) => !record.finished,
+					).length;
+				});
+			});
+			await reveal(page, left.reveal + right.reveal);
+			await page.waitForFunction(() => (window as any).__streamCaptures.length > 0);
+			expect(
+				await page.evaluate(() =>
+					(window as any).__streamCaptures.map((record: any) => record.owner),
+				),
+			).toEqual(['left-scope', 'right-scope']);
+			await page.waitForFunction(
+				() =>
+					(window as any).__streamCaptures.length === 2 &&
+					(window as any).__streamCaptures.every((record: any) => record.new),
+			);
+			await page.locator('#outside-control').click();
+			expect(await page.evaluate(() => (window as any).__clickedDuringScopes)).toBe(2);
+			const captures = await settle(page, 2);
+			expect(captures.map((capture: any) => capture.owner)).toEqual(['left-scope', 'right-scope']);
+			for (const capture of captures) {
+				expect(capture.error).toBeUndefined();
+				expect(capture.animations).toContain('::view-transition-group(wave-hero)');
+			}
+			expect(await page.locator('#left-scope #wave-new').textContent()).toBe('Content');
+			expect(await page.locator('#right-scope #wave-new').textContent()).toBe('Content');
+			expect(
+				await page
+					.locator('#left-scope, #right-scope')
+					.evaluateAll((elements) =>
+						elements.map((el) => getComputedStyle(el).getPropertyValue('view-transition-scope')),
+					),
+			).toEqual(['all', 'all']);
+			expect(errors).toEqual([]);
+		} finally {
+			await page.close();
+		}
+	});
+
+	it('keeps a nested stream scope out of its outer native pseudo tree', async () => {
+		const html = await streamed('NestedScopedStreamApp');
+		const { page, errors } = await open(html.shell);
+		try {
+			await reveal(page, html.reveal);
+			await page.waitForFunction(() => (window as any).__streamCaptures.length > 0);
+			expect(
+				await page.evaluate(() =>
+					(window as any).__streamCaptures.map((record: any) => record.owner),
+				),
+			).toEqual(['outer-scope', 'inner-scope']);
+			const captures = await settle(page, 2);
+			const outer = captures.find((capture: any) => capture.owner === 'outer-scope');
+			const inner = captures.find((capture: any) => capture.owner === 'inner-scope');
+			expect(outer?.error).toBeUndefined();
+			expect(inner?.error).toBeUndefined();
+			expect(outer?.animations).not.toContain('::view-transition-group(wave-hero)');
+			expect(inner?.animations).toContain('::view-transition-group(wave-hero)');
+			expect(await page.locator('#outer-content').textContent()).toBe('Content');
+			expect(await page.locator('#wave-new').textContent()).toBe('Content');
+			expect(errors).toEqual([]);
+		} finally {
+			await page.close();
+		}
+	});
+
+	it('captures mixed document and element streams before publishing their shared reveal', async () => {
+		const scoped = await streamed('ScopedStreamApp', { id: 'mixed-scope' });
+		const ordinary = await streamed('StreamTextApp', { id: 'document-content' });
+		const { page, errors } = await open(scoped.shell + ordinary.shell);
+		try {
+			await reveal(page, scoped.reveal + ordinary.reveal);
+			await page.waitForFunction(() => (window as any).__streamCaptures.length > 0);
+			expect(await page.evaluate(() => (window as any).__streamCaptures[0].owner)).toBe(
+				'mixed-scope',
+			);
+			const captures = await settle(page, 2);
+			expect(captures.map((capture: any) => capture.owner)).toEqual(['mixed-scope', 'document']);
+			for (const capture of captures) expect(capture.error).toBeUndefined();
+			expect(captures[1].old['document-content']).toBeUndefined();
+			expect(await page.locator('#document-content').textContent()).toBe('Content');
+			expect(await page.locator('#wave-new').textContent()).toBe('Content');
+			expect(errors).toEqual([]);
+		} finally {
+			await page.close();
+		}
+	});
+
 	it('captures nested exit and parent-enter relays and restores styles after a real reveal', async () => {
 		const html = await streamed('RelayApp', { relay: 'relay' });
 		const { page, errors } = await open(html.shell);
