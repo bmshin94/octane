@@ -77,7 +77,7 @@ import {
 	type StrongProjectorConstructor,
 	type SnapshotRow,
 } from './_fixtures/for-strong.tsrx';
-import { SnapshotMappedList } from './_fixtures/for-strong.js';
+import { SnapshotMappedList } from './_fixtures/for-snapshot-compat.js';
 
 const labels = (r: ReturnType<typeof mount>) => r.findAll('li').map((li) => li.textContent);
 
@@ -414,7 +414,7 @@ describe('forBlock — live methods in compatibility mode', () => {
 	});
 });
 
-describe('Strong list methods preserve snapshot and event semantics', () => {
+describe('List methods preserve snapshot and event semantics', () => {
 	const row = (id: number, label: string): SnapshotRow => ({
 		id,
 		label,
@@ -424,8 +424,8 @@ describe('Strong list methods preserve snapshot and event semantics', () => {
 	});
 
 	it.each([
-		['keyed templates', SnapshotMethodList],
-		['returned JSX', SnapshotMappedList],
+		['Strong keyed templates', SnapshotMethodList],
+		['compatibility mapped JSX', SnapshotMappedList],
 	])('updates snapshots, arguments, and captured callbacks in %s', (_dialect, Component) => {
 		const items = [row(1, 'apple'), row(2, 'banana')];
 		const selected: string[] = [];

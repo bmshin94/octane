@@ -1,11 +1,22 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { compile } from '../../src/compiler/compile.js';
+import { compile } from 'octane/compiler';
 import { slotHooks } from '../../src/compiler/slot-hooks.js';
 import { compileToVolarMappings } from '../../src/compiler/volar.js';
 
 const strong = (source: string) => `"use strong";\n${source}`;
 
 describe('Strong template authoring checks', () => {
+	it('keeps the mapped snapshot fixture in compatibility mode and rejects Strong opt-in', () => {
+		const filename = 'packages/octane/tests/_fixtures/for-snapshot-compat.tsx';
+		const source = readFileSync(filename, 'utf8');
+		for (const mode of ['client', 'server'] as const) {
+			expect(() => compile(source, filename, { mode })).not.toThrow();
+			expect(() => compile(source, filename, { mode, strong: true })).toThrow(
+				'OCTANE_STRONG_MAP_JSX',
+			);
+		}
+	});
 	it.each([
 		['inline JSX', 'props.items.map(item => <li>{item.name as string}</li>)'],
 		['computed map', 'props.items["map"](item => <li />)'],
