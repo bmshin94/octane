@@ -17,13 +17,21 @@
   },
   "adaptedRoots": {
     "source": {
-      "roots": ["packages/alien-signals/src"],
-      "include": ["\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"],
+      "roots": [
+        "packages/alien-signals/src"
+      ],
+      "include": [
+        "\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"
+      ],
       "exclude": []
     },
     "tests": {
-      "roots": ["packages/alien-signals/tests"],
-      "include": ["upstream-adapted\\.test\\.ts$"],
+      "roots": [
+        "packages/alien-signals/tests"
+      ],
+      "include": [
+        "upstream-adapted\\.test\\.ts$"
+      ],
       "exclude": []
     }
   },
@@ -40,7 +48,7 @@
       "arch": "any",
       "packageManager": "pnpm@11.15.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "57dcbd6657cce7470df1124f428731acc5136b8c0188c8b59a96c95dbd7e459e"
+      "lockfileSha256": "08ea74c2a7a1ee803924caf6fab7f7b1cd9b7444a0b17658892b2b37707aa3c0"
     }
   },
   "lanes": [
@@ -80,7 +88,7 @@
         {
           "path": "scripts/react-parity/run-pristine.mjs",
           "role": "support",
-          "sha256": "336ac656ce6283a7199c56b3dd7f8ad73b60a3add26feb65bdb973224f3d405e"
+          "sha256": "131c7cb8e8f9ee1f57af3691acf7442a94a29ad628f22beec0afc2f7aa16757e"
         },
         {
           "path": "packages/alien-signals/audit/pristine-oracle-environment.json",
@@ -292,7 +300,9 @@
   "divergences": [
     {
       "id": "alien-signals-readable-computed",
-      "caseIds": ["types:alien-signals-adapted"],
+      "caseIds": [
+        "types:alien-signals-adapted"
+      ],
       "upstreamResult": "Pinned react-alien-signals declarations narrow useSignalValue to WritableSignal, so readable computed probes are rejected.",
       "octaneResult": "useSignalValue accepts ReadableSignal, including createComputed results, matching the documented Octane surface.",
       "rationale": "Upstream docs and runtime treat computed signals as readable; the published React declaration is narrower than that contract. Octane corrects the accept surface without weakening the read-only computed negative control.",
@@ -304,7 +314,9 @@
     },
     {
       "id": "alien-signals-use-signal-scope",
-      "caseIds": ["runtime:5189801c40af28d9"],
+      "caseIds": [
+        "runtime:5189801c40af28d9"
+      ],
       "upstreamResult": "useSignalScope starts createSignalScope during React render via useMemo and returns that stop handle; pre-commit cancellation is not modeled.",
       "octaneResult": "useSignalScope allocates a cancellation-safe controller during render, starts the scope after client commit via useEffect, and returns a stop that can cancel before commit.",
       "rationale": "Octane forbids render-phase effects. Deferring scope start to commit preserves SSR/hydration safety and makes pre-commit stop a no-op instead of racing a render-created scope.",

@@ -17,13 +17,21 @@
   },
   "adaptedRoots": {
     "source": {
-      "roots": ["packages/monaco-editor/src"],
-      "include": ["\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"],
+      "roots": [
+        "packages/monaco-editor/src"
+      ],
+      "include": [
+        "\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"
+      ],
       "exclude": []
     },
     "tests": {
-      "roots": ["packages/monaco-editor/tests/upstream"],
-      "include": ["\\.(?:test|spec)\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"],
+      "roots": [
+        "packages/monaco-editor/tests/upstream"
+      ],
+      "include": [
+        "\\.(?:test|spec)\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"
+      ],
       "exclude": []
     }
   },
@@ -40,7 +48,7 @@
       "arch": "any",
       "packageManager": "pnpm@11.15.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "57dcbd6657cce7470df1124f428731acc5136b8c0188c8b59a96c95dbd7e459e"
+      "lockfileSha256": "08ea74c2a7a1ee803924caf6fab7f7b1cd9b7444a0b17658892b2b37707aa3c0"
     }
   },
   "lanes": [
@@ -80,7 +88,7 @@
         {
           "path": "scripts/react-parity/run-pristine.mjs",
           "role": "support",
-          "sha256": "336ac656ce6283a7199c56b3dd7f8ad73b60a3add26feb65bdb973224f3d405e"
+          "sha256": "131c7cb8e8f9ee1f57af3691acf7442a94a29ad628f22beec0afc2f7aa16757e"
         },
         {
           "path": "packages/monaco-editor/tests/upstream-pristine.vitest.config.ts",
@@ -365,7 +373,9 @@
   "divergences": [
     {
       "id": "container-ref",
-      "caseIds": ["runtime:01c65bf4eb0a9c0a"],
+      "caseIds": [
+        "runtime:01c65bf4eb0a9c0a"
+      ],
       "upstreamResult": "Internal MonacoContainer accepts _ref",
       "octaneResult": "Internal MonacoContainer accepts Octane ref",
       "rationale": "Octane has no forwardRef; refs are ordinary props.",
@@ -377,7 +387,10 @@
     },
     {
       "id": "loading-octane-node",
-      "caseIds": ["runtime:d07e2092dc25c9e0", "runtime:d4a860ff21ebcdec"],
+      "caseIds": [
+        "runtime:d07e2092dc25c9e0",
+        "runtime:d4a860ff21ebcdec"
+      ],
       "upstreamResult": "loading?: ReactNode",
       "octaneResult": "loading?: OctaneNode | string",
       "rationale": "Octane renderable type.",

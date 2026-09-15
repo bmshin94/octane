@@ -17,13 +17,21 @@
   },
   "adaptedRoots": {
     "source": {
-      "roots": ["packages/solana-kit/src"],
-      "include": ["\\.(?:ts|tsrx)$"],
+      "roots": [
+        "packages/solana-kit/src"
+      ],
+      "include": [
+        "\\.(?:ts|tsrx)$"
+      ],
       "exclude": []
     },
     "tests": {
-      "roots": ["packages/solana-kit/tests/upstream"],
-      "include": ["\\.test\\.ts$"],
+      "roots": [
+        "packages/solana-kit/tests/upstream"
+      ],
+      "include": [
+        "\\.test\\.ts$"
+      ],
       "exclude": []
     }
   },
@@ -40,7 +48,7 @@
       "arch": "any",
       "packageManager": "pnpm@11.15.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "57dcbd6657cce7470df1124f428731acc5136b8c0188c8b59a96c95dbd7e459e"
+      "lockfileSha256": "08ea74c2a7a1ee803924caf6fab7f7b1cd9b7444a0b17658892b2b37707aa3c0"
     }
   },
   "lanes": [
@@ -80,7 +88,7 @@
         {
           "path": "scripts/react-parity/run-pristine.mjs",
           "role": "support",
-          "sha256": "336ac656ce6283a7199c56b3dd7f8ad73b60a3add26feb65bdb973224f3d405e"
+          "sha256": "131c7cb8e8f9ee1f57af3691acf7442a94a29ad628f22beec0afc2f7aa16757e"
         },
         {
           "path": "packages/solana-kit/tests/upstream-vitest.config.ts",
@@ -234,7 +242,10 @@
   "divergences": [
     {
       "id": "solana-kit-missing-provider-error",
-      "caseIds": ["runtime:32e73d9952587b2f", "runtime:d775c531b3e8370b"],
+      "caseIds": [
+        "runtime:32e73d9952587b2f",
+        "runtime:d775c531b3e8370b"
+      ],
       "upstreamResult": "useClient throws SolanaError MISSING_PROVIDER with hookName context.",
       "octaneResult": "useClient throws a plain Error with message 'useClient must be used inside ClientProvider'.",
       "rationale": "The Octane binding keeps the public failure surface free of @solana/kit React error codes while preserving the must-be-under-provider contract.",
@@ -278,7 +289,9 @@
     },
     {
       "id": "solana-kit-query-ssr",
-      "caseIds": ["runtime:04e39c17fcc6fcd5"],
+      "caseIds": [
+        "runtime:04e39c17fcc6fcd5"
+      ],
       "upstreamResult": "renderToString of useRequestQuery renders idle markup without firing queryFn.",
       "octaneResult": "QueryClientProvider SSR host plumbing may throw in this pin; the adapted identity still asserts queryFn is not invoked while effects are absent.",
       "rationale": "Preserve the no-fetch-during-SSR oracle without weakening it to a skipped case.",

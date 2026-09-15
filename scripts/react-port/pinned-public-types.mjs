@@ -89,20 +89,30 @@ export function pinnedPublicEntries(packageDirectory, node) {
 	}
 	for (const [subpath, target] of Object.entries(manifest.exports)) {
 		if (subpath === './package.json') continue;
-		let file = target?.import?.types ?? target?.types ?? target?.default?.types;
-		if (typeof file !== 'string') {
-			const request = subpath === '.' ? manifest.name : manifest.name + subpath.slice(1);
-			const resolved = ts.resolveModuleName(
-				request,
-				path.join(packageDirectory, '__public_type_witness__.ts'),
-				{ moduleResolution: ts.ModuleResolutionKind.Bundler, module: ts.ModuleKind.ESNext },
-				ts.sys,
-			).resolvedModule?.resolvedFileName;
-			if (!resolved || !/\.d\.[cm]?ts$/.test(resolved))
+		if (typeof target !== 'object' || target === null) continue;
+		// Let the checking compiler select versioned and nested export conditions,
+		// just as it does for the consumer. A fallback `types` may intentionally
+		// reject older compilers rather than describe the current public surface.
+		const upstreamSpecifier = node.identity.packageName + (subpath === '.' ? '' : subpath.slice(1));
+		const resolved = ts.resolveModuleName(
+			upstreamSpecifier,
+			path.join(packageDirectory, 'package.json'),
+			{ module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler },
+			ts.sys,
+		).resolvedModule;
+		let file;
+		if (resolved && /\.d\.[cm]?ts$/.test(resolved.resolvedFileName)) {
+			file = path.relative(installedRoot, resolved.resolvedFileName).replaceAll(path.sep, '/');
+		} else {
+			// An export the compiler cannot place on a declaration still needs one:
+			// fall back to its declared types condition rather than dropping the
+			// public entry silently.
+			const declared = target?.import?.types ?? target?.types ?? target?.default?.types;
+			if (typeof declared !== 'string')
 				throw new Error(`Public export has no pinned declaration: ${subpath}`);
-			file = './' + path.relative(installedRoot, resolved).split(path.sep).join('/');
+			file = declared.replace(/^\.\//, '');
 		}
-		if (!published.files.has(`package/${file.slice(2)}`))
+		if (!published.files.has(`package/${file}`))
 			throw new Error(`Public export points outside the pinned declarations: ${file}`);
 		const specifier = subpath === '.' ? node.binding : node.binding + subpath.slice(1);
 		entries.set(specifier, path.resolve(installedRoot, file));
@@ -629,14 +639,10 @@ export function newOpaquePublicSymbol(symbol, witness, checker, options = {}) {
 	if (symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
 	if (witness?.flags & ts.SymbolFlags.Alias) witness = checker.getAliasedSymbol(witness);
 	for (const declaration of symbol.declarations ?? []) {
-		// Source implementations may carry a wider private rest signature after
-		// public overloads. Only the overload declarations form the exported API.
-		if (
-			ts.isFunctionDeclaration(declaration) &&
-			declaration.body &&
-			symbol.declarations.some((other) => ts.isFunctionDeclaration(other) && !other.body)
-		)
-			continue;
+		// Callable generics are checked per public signature below. Matching every
+		// overload to the first declaration mispairs constraints and includes the
+		// implementation signature, which is not part of the exported contract.
+		if (ts.isFunctionDeclaration(declaration)) continue;
 		const candidates =
 			witness?.declarations?.filter(
 				(candidate) =>

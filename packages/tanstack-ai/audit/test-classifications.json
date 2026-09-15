@@ -7,6 +7,11 @@
       "reason": "Observes native Octane UI, browser, hydration, portal, and lifecycle behavior; full pinned upstream runtime parity is recorded in separate adapted lanes."
     },
     {
+      "path": "packages/tanstack-ai/tests/conformance/chat-ui-children.test.ts",
+      "disposition": "octane-only-framework-contract",
+      "reason": "Observes native Octane template-children and render-prop behavior for chat UI widgets; it is not a React runtime oracle."
+    },
+    {
       "path": "packages/tanstack-ai/tests/conformance/exports.test.ts",
       "disposition": "octane-only-framework-contract",
       "reason": "Checks the Octane root export surface; it is not a React runtime oracle."

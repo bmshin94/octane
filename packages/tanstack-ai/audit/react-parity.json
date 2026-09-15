@@ -17,13 +17,23 @@
   },
   "adaptedRoots": {
     "source": {
-      "roots": ["packages/tanstack-ai/src"],
-      "include": ["\\.(?:ts|tsrx)$"],
-      "exclude": ["\\.d\\.ts$"]
+      "roots": [
+        "packages/tanstack-ai/src"
+      ],
+      "include": [
+        "\\.(?:ts|tsrx)$"
+      ],
+      "exclude": [
+        "\\.d\\.ts$"
+      ]
     },
     "tests": {
-      "roots": ["packages/tanstack-ai/tests/upstream"],
-      "include": ["\\.test\\.tsx?$"],
+      "roots": [
+        "packages/tanstack-ai/tests/upstream"
+      ],
+      "include": [
+        "\\.test\\.tsx?$"
+      ],
       "exclude": []
     }
   },
@@ -40,7 +50,7 @@
       "arch": "any",
       "packageManager": "pnpm@11.15.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "57dcbd6657cce7470df1124f428731acc5136b8c0188c8b59a96c95dbd7e459e"
+      "lockfileSha256": "08ea74c2a7a1ee803924caf6fab7f7b1cd9b7444a0b17658892b2b37707aa3c0"
     }
   },
   "lanes": [
@@ -189,7 +199,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -219,7 +229,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -239,7 +249,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -434,7 +444,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -464,7 +474,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -484,7 +494,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -664,7 +674,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -694,7 +704,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -714,7 +724,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -896,7 +906,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -926,7 +936,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -946,7 +956,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -1128,7 +1138,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -1158,7 +1168,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -1178,7 +1188,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -1345,7 +1355,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -1375,7 +1385,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -1395,7 +1405,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -1569,7 +1579,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -1599,7 +1609,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -1619,7 +1629,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -1761,7 +1771,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -1791,7 +1801,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -1811,7 +1821,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -1953,7 +1963,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -1983,7 +1993,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -2003,7 +2013,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -2144,7 +2154,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -2174,7 +2184,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -2194,7 +2204,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -2335,7 +2345,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -2365,7 +2375,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -2385,7 +2395,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
@@ -2526,7 +2536,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-input.tsrx",
           "role": "support",
-          "sha256": "5b55ce06d6677b46ca810f3ab4ae800d24c36c6c5e16e78aa864ced3bb5be808"
+          "sha256": "fe1a705ebd465c8605c215dc82dafe888529535dbfabfbcc4e14f809aafaeb17"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/chat-message.tsrx",
@@ -2556,7 +2566,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/create-ui.tsrx",
           "role": "support",
-          "sha256": "f846c9b781ae653ad01a0a628541dd4771b46788135f70b4a2427f33e18cf435"
+          "sha256": "8357a117af825f1986dd90cc0f8f327ca6425168fe2458642af0c6251eab1b6a"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/markdown-plugins.ts",
@@ -2576,7 +2586,7 @@
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-approval.tsrx",
           "role": "support",
-          "sha256": "8427d319c5663fc63bfcda3e539c6da3bcba62840f7bf1c6ec93c14e28f88716"
+          "sha256": "be9c8905c20a3d5bc8c8d164fc6e906a27893baed6bee48ee09c07825cdbf142"
         },
         {
           "path": "packages/tanstack-ai/src/chat-ui/tool-result-content.ts",
