@@ -377,8 +377,11 @@ catalogs:
     # package ports, at the pinned release.
     '@vis.gl/react-mapbox': 8.1.2
     '@phosphor-icons/react': 2.1.10
-    motion: ^13.2.0
-    motion-dom: ^13.2.0
+    # Pinned upstream evidence authenticates Motion 13.2.0; the pristine lane's
+    # materialized suite reads motion-dom internals (MotionValue events), so the
+    # catalog must not float past the pinned version.
+    motion: 13.2.0
+    motion-dom: 13.2.0
     miniflare: 4.20260714.0
     nuqs: 2.9.1
     '@standard-schema/spec': 1.1.0
