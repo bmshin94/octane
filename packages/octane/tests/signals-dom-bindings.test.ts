@@ -14,43 +14,54 @@ const server = loadServerFixture<typeof client>(
 );
 
 describe('signal-valued DOM styles', () => {
-	it('restores accepted styles while a sibling suspends in a transition', async () => {
-		const scope = createScope({ scopeKey: 'held-style' });
-		const left$ = scope.signal$<number | null>('left', 0);
-		const key$ = scope.signal$('key', 'first');
-		let resolve!: (value: number) => void;
-		const request = query('position', (key: string) =>
-			key === 'first'
-				? Promise.resolve(10)
-				: new Promise<number>((done) => {
-						resolve = done;
-					}),
-		);
-		const right$ = scope.asyncSignal$('right', () => request(key$.get()));
-		const rendered = mount(client.GuardedStylePair, { left$, right$ });
-		try {
-			await act(() => {});
-			const hosts = rendered.findAll('section > div') as HTMLElement[];
-			expect(hosts.map((host) => host.style.left)).toEqual(['0px', '10px']);
-			await act(() =>
-				startTransition(() =>
-					scope.batch(() => {
-						left$.set(1);
-						key$.set('second');
-					}),
-				),
+	it.each([client.GuardedStylePair, client.GuardedSpreadStylePair])(
+		'restores accepted styles while a sibling suspends in a transition',
+		async (Component) => {
+			const scope = createScope({ scopeKey: 'held-style' });
+			const left$ = scope.signal$<number | null>('left', 0);
+			const key$ = scope.signal$('key', 'first');
+			let resolve!: (value: number) => void;
+			const request = query('position', (key: string) =>
+				key === 'first'
+					? Promise.resolve(10)
+					: new Promise<number>((done) => {
+							resolve = done;
+						}),
 			);
-			expect(hosts.map((host) => host.style.left)).toEqual(['0px', '10px']);
-			await act(() => left$.set(2));
-			expect(hosts.map((host) => host.style.left)).toEqual(['0px', '10px']);
-			await act(() => resolve(20));
-			expect(rendered.findAll('section > div')).toEqual(hosts);
-			expect(hosts.map((host) => host.style.left)).toEqual(['2px', '20px']);
-		} finally {
-			rendered.unmount();
-			scope.dispose();
-		}
-	});
+			const right$ = scope.asyncSignal$('right', () => request(key$.get()));
+			const rendered = mount(Component, {
+				left$,
+				right$,
+				leftStyle: Object.fromEntries([['left', left$]]),
+				rightStyle: Object.fromEntries([['left', right$]]),
+			});
+			try {
+				await act(() => {});
+				const hosts = rendered.findAll('section > div') as HTMLElement[];
+				expect(hosts.map((host) => host.style.left)).toEqual(['0px', '10px']);
+				await act(() =>
+					startTransition(() =>
+						scope.batch(() => {
+							left$.set(1);
+							key$.set('second');
+						}),
+					),
+				);
+				expect(hosts.map((host) => host.style.left)).toEqual(['0px', '10px']);
+				await act(() => left$.set(2));
+				expect(hosts.map((host) => host.style.left)).toEqual(['0px', '10px']);
+				await act(() => resolve(20));
+				const current = rendered.findAll('section > div');
+				expect(current).toHaveLength(2);
+				expect(current[0]).toBe(hosts[0]);
+				expect(current[1]).toBe(hosts[1]);
+				expect(hosts.map((host) => host.style.left)).toEqual(['2px', '20px']);
+			} finally {
+				rendered.unmount();
+				scope.dispose();
+			}
+		},
+	);
 
 	it('preserves hidden Activity content and catches up when shown', async () => {
 		const scope = createScope({ scopeKey: 'hidden-style' });

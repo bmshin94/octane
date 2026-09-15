@@ -1,6 +1,6 @@
 import { Activity } from 'octane';
 import { useSignal$ } from 'octane/signals/client';
-import type { CSSProperties } from 'octane/jsx-runtime';
+import type { CSSProperties, SignalCSSProperties } from 'octane/jsx-runtime';
 import type { SignalHandle } from 'octane/signals';
 
 export function LocalStyles(props: { style?: CSSProperties }) @{
@@ -86,6 +86,24 @@ export function GuardedStylePair(props: {
 		<section>
 			<SignalStyles left$={props.left$} />
 			<SignalStyles left$={props.right$} />
+		</section>
+	} @pending {
+		<p>{'waiting'}</p>
+	}
+}
+
+function SpreadOnlyStyles(props: { attributes: { style: SignalCSSProperties } }) @{
+	<div {...props.attributes} />
+}
+
+export function GuardedSpreadStylePair(props: {
+	leftStyle: SignalCSSProperties;
+	rightStyle: SignalCSSProperties;
+}) @{
+	@try {
+		<section>
+			<SpreadOnlyStyles attributes={{ style: props.leftStyle }} />
+			<SpreadOnlyStyles attributes={{ style: props.rightStyle }} />
 		</section>
 	} @pending {
 		<p>{'waiting'}</p>

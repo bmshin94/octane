@@ -6385,15 +6385,17 @@ function containsAutoMemoUnsafeStructure(stmts, ctx = null) {
 			if (containsDeferredRefRead(n)) found = true;
 			return;
 		}
-		// A native style binding performs implicit reads in its own scheduled Block.
-		// Equal props cannot prove its subtree complete during a boundary retry;
-		// those reads are outside the parent call's automatic memo witness.
+		// Native styles perform implicit reads, including styles carried by a host
+		// prop spread. Equal props cannot prove the subtree complete during a
+		// boundary retry: these reads are outside the parent call's memo witness.
 		if (
 			ctx?.nativeReads &&
 			n.type === 'JSXOpeningElement' &&
 			n.name?.type === 'JSXIdentifier' &&
 			/^[a-z]/.test(n.name.name) &&
 			n.attributes.some((attribute) => {
+				if (attribute.type === 'JSXSpreadAttribute' || attribute.type === 'SpreadAttribute')
+					return true;
 				if (attribute.name?.name !== 'style' || attribute.value?.type !== 'JSXExpressionContainer')
 					return false;
 				const value = unwrapTsExpr(attribute.value.expression);
