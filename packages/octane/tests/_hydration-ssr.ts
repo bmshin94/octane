@@ -11,13 +11,22 @@ type HydrationBinding =
 	| 'base-ui'
 	| 'docusaurus'
 	| 'formisch'
+	| 'hook-form'
+	| 'intersection-observer'
+	| 'mantine-hooks'
 	| 'monaco-editor'
+	| 'motion'
+	| 'mobx'
 	| 'pdf'
 	| 'rainbowkit'
+	| 'react-error-boundary'
 	| 'react-map-gl'
+	| 'react-window'
 	| 'select'
 	| 'solana-kit'
 	| 'testing-library'
+	| 'thinking-orbs'
+	| 'window'
 	| 'tanstack-pacer'
 	| 'tanstack-query'
 	| 'tanstack-virtual'
@@ -28,7 +37,35 @@ type HydrationBinding =
 const repositoryRoot = resolve(import.meta.dirname, '../../..');
 
 function bindingAliases(binding: HydrationBinding) {
+	if (binding === 'window' || binding === 'react-window') {
+		return [
+			{
+				find: /^@octanejs\/window$/,
+				replacement: resolve(repositoryRoot, 'packages/window/src/index.ts'),
+			},
+		];
+	}
 	const source = resolve(repositoryRoot, 'packages', binding, 'src');
+	if (binding === 'thinking-orbs')
+		return [{ find: /^@octanejs\/thinking-orbs$/, replacement: resolve(source, 'index.ts') }];
+	if (binding === 'react-error-boundary') {
+		return [
+			{ find: /^@octanejs\/react-error-boundary$/, replacement: resolve(source, 'server.tsrx') },
+		];
+	}
+
+	if (
+		binding === 'mantine-hooks' ||
+		binding === 'mobx' ||
+		binding === 'motion' ||
+		binding === 'intersection-observer' ||
+		binding === 'hook-form'
+	) {
+		return [
+			{ find: new RegExp(`^@octanejs/${binding}$`), replacement: resolve(source, 'index.ts') },
+		];
+	}
+
 	if (binding === 'alien-signals') {
 		return [{ find: /^@octanejs\/alien-signals$/, replacement: resolve(source, 'index.ts') }];
 	}

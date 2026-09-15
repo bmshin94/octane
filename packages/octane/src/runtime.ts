@@ -4919,6 +4919,10 @@ function drainQueue(): { err: any } | null {
 			// retries the render; if it no longer suspends (an external store flipped
 			// before the suspending promise resolved), the boundary reveals now.
 			if (hiddenTry !== null) {
+				// The retry starts at the boundary, not this scheduled descendant.
+				// Preserve its changed input through equal-props ancestor bailouts,
+				// including retries that suspend before reaching the child again.
+				invalidateRender(block, hiddenTry.tryBlock);
 				visibilityDriver!.reveal(hiddenTry, block.pendingMode ?? 'urgent');
 				continue;
 			}
@@ -10108,6 +10112,8 @@ export function useSyncExternalStore<T>(
 		}
 	}
 
+	if (SCOPED_READ_TRACKING) (SCOPED_READS ??= new Map()).set(inst, value);
+
 	// Subscription lifecycle stays a real passive effect — it owns the unsubscribe
 	// cleanup (re-subscribe on store swap, unsubscribe on unmount) a bare queue
 	// entry can't carry. inst is identity-stable, so the deps `[inst, subscribe]`
@@ -12251,12 +12257,23 @@ function recordContextDependency(block: Block | null, context: Context<any>): vo
 // churns effect/memo deps and cannot converge when such an effect feeds that
 // provider.
 let SCOPED_READ_TRACKING = false;
-let SCOPED_READS: Map<Context<any>, number> | null = null;
+// Store snapshots share the existing deferred-read witness map. Records that
+// read neither context nor stores keep the original allocation-free cache path.
+type ScopedReads = Map<Context<any> | StoreInst<any>, unknown>;
+let SCOPED_READS: ScopedReads | null = null;
 
-function scopedReadsChanged(reads: Map<Context<any>, number> | null): boolean {
+function scopedReadsChanged(reads: ScopedReads | null): boolean {
 	if (reads === null) return false;
-	for (const [context, version] of reads) {
-		if (context.$$version !== version) return true;
+	for (const [source, value] of reads) {
+		if ('$$version' in source) {
+			if (source.$$version !== value) return true;
+		} else {
+			try {
+				if (!Object.is(value, source.getSnapshot())) return true;
+			} catch {
+				return true;
+			}
+		}
 	}
 	return false;
 }
@@ -12265,17 +12282,19 @@ function scopedReadsChanged(reads: Map<Context<any>, number> | null): boolean {
 // A cache hit must transfer those reads to the current render, just like an
 // actual useContext call. Nested resolvers also contribute to their enclosing
 // resolver's capture, or caching the outer record would hide the nested reads.
-function replayScopedContextReads(reads: Map<Context<any>, number>, block: Block | null): void {
-	for (const [context, version] of reads) {
-		if (block !== null) recordContextDependency(block, context);
-		if (SCOPED_READ_TRACKING) (SCOPED_READS ??= new Map()).set(context, version);
+function replayScopedContextReads(reads: ScopedReads, block: Block | null): void {
+	for (const [source, value] of reads) {
+		if ('$$version' in source) {
+			if (block !== null) recordContextDependency(block, source);
+		}
+		if (SCOPED_READ_TRACKING) (SCOPED_READS ??= new Map()).set(source, value);
 	}
 }
 
 function createScopedResolver<T>(read: () => T): () => T {
 	let resolved = false;
 	let resolvedScope: Scope | null = null;
-	let resolvedReads: Map<Context<any>, number> | null = null;
+	let resolvedReads: ScopedReads | null = null;
 	let resolvedValue: T;
 
 	return (): T => {
@@ -12327,7 +12346,7 @@ function createScopedResolver<T>(read: () => T): () => T {
 function createNativeScopedResolver<T>(read: () => T): () => T {
 	let resolved = false;
 	let resolvedScope: Scope | null = null;
-	let resolvedReads: Map<Context<any>, number> | null = null;
+	let resolvedReads: ScopedReads | null = null;
 	let resolvedWitness: NativeReadWitness | null | undefined;
 	let resolvedValue: T;
 
@@ -12360,7 +12379,7 @@ function createNativeScopedResolver<T>(read: () => T): () => T {
 				const witnessToken = beginNativeReadWitness();
 				let readCompleted = false;
 				let next: T;
-				let nextReads: Map<Context<any>, number> | null;
+				let nextReads: ScopedReads | null;
 				let nextWitness: NativeReadWitness | null;
 				try {
 					next = read();
@@ -16633,7 +16652,13 @@ function deoptChildNamespace(parent: Node): string | undefined {
 	if (parent.nodeType !== 1) return undefined;
 	const el = parent as Element;
 	if (el.namespaceURI === SVG_NS) return el.localName === 'foreignObject' ? undefined : SVG_NS;
-	if (el.namespaceURI === MATHML_NS) return MATHML_NS;
+	if (el.namespaceURI === MATHML_NS) {
+		if (el.localName === 'annotation-xml') {
+			const encoding = el.getAttribute('encoding')?.toLowerCase();
+			if (encoding === 'text/html' || encoding === 'application/xhtml+xml') return undefined;
+		}
+		return MATHML_NS;
+	}
 	return undefined;
 }
 
@@ -24107,7 +24132,10 @@ export function hostComponent(
 	const block = scope.block;
 	let state = scope.slots[slot] as HostComponentSlot | undefined;
 	if (state === undefined) {
-		const el = document.createElement(tag);
+		// Runtime adapters inherit the actual destination, including SVG portals
+		// and foreignObject children, just like descriptor/string-tag hosts.
+		const ns = inferTagNs(tag, deoptChildNamespace(block.parentNode));
+		const el = ns === undefined ? document.createElement(tag) : document.createElementNS(ns, tag);
 		// The children childSlot exclusively OWNS `el`'s content (owns-parent
 		// mode) — no `<!---->` insertion anchor needed (marker-elision M2).
 		state = {
@@ -28678,6 +28706,7 @@ export function errorBlock(
 
 	if (state.block !== null) {
 		const previous = state.block;
+		if (stageErrorReset(state, switchErrorToCatch)) return state.reset;
 		state.block = null;
 		unmountBlock(previous);
 		if (state.parentBlock.disposed || state.block !== null) return state.reset;
@@ -28750,6 +28779,65 @@ export function errorBlock(
 		if (previousNative !== undefined) setNativeAdoptionResolver(previousNative);
 	}
 	return state.reset;
+}
+
+// Both imported and dynamic ErrorBoundary forms retain their committed catch
+// arm until a suspending retry can replace it. The optional driver keeps this
+// cold path out of applications that never use Suspense or transitions.
+function stageErrorReset<T extends TrySlot | ErrorSlot>(
+	state: T,
+	catchError: (state: T, error: unknown, reportInline?: boolean) => void,
+): boolean {
+	const previous = state.block;
+	const swapDriver = TRANSITION_SWAP_DRIVER;
+	if (
+		previous === null ||
+		!previous.mounted ||
+		swapDriver === null ||
+		activeHydration() !== null ||
+		!preservesCommittedSuspense(state.parentBlock)
+	)
+		return false;
+	if (ROOT_RENDER_TRANSACTION !== null)
+		journalRootSlot(state, state.domParent, state.start, state.end);
+	const retry: ComponentBody = (props, scope) => {
+		scope.block.idState = state.idState;
+		return state.tryBody(props, scope, state.env);
+	};
+	const result = swapDriver.render(
+		state.parentBlock,
+		state.domParent,
+		previous.endMarker ?? state.start,
+		retry,
+		undefined,
+		null,
+		'control-flow',
+		state.env,
+	);
+	if (result.suspended !== null || result.failed) {
+		swapDriver.dispose(result.wip);
+		if (result.suspended !== null) throw new SuspenseException(result.suspended);
+		if (isHostContextRequest(result.error) || result.error instanceof NativeAdoptionMiss)
+			throw result.error;
+		catchError(state, result.error, true);
+		return true;
+	}
+	const body = result.wip.block;
+	body.body = state.tryBody;
+	(body as any).$$tryHandler = (error: unknown) => {
+		catchError(state, error);
+		return state.block;
+	};
+	if (state.__kind === 'trySlotSlot') {
+		state.tryBlock = body;
+		(body as any).__trySlot = state;
+	}
+	state.block = body;
+	state.hasResolved = true;
+	setTryBranch(state, 1);
+	swapDriver.splice(result.wip);
+	unmountBlock(previous);
+	return true;
 }
 
 function switchErrorToCatch(
@@ -29351,6 +29439,8 @@ function renderInitialSuspenseHydration(state: TrySlot, initial: InitialSuspense
 }
 
 function mountTry(state: TrySlot): void {
+	if (state.propagateSuspense && state.branch === -1 && stageErrorReset(state, switchToCatch))
+		return;
 	cancelSuspenseRetry(state);
 	HIDDEN_REVEAL_ACTIONS?.delete(state);
 	const wasPending = state.branch === 2;

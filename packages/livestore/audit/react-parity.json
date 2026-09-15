@@ -16,21 +16,13 @@
   },
   "adaptedRoots": {
     "source": {
-      "roots": [
-        "packages/livestore/src"
-      ],
-      "include": [
-        "\\.(?:ts|tsrx)$"
-      ],
+      "roots": ["packages/livestore/src"],
+      "include": ["\\.(?:ts|tsrx)$"],
       "exclude": []
     },
     "tests": {
-      "roots": [
-        "packages/livestore/tests"
-      ],
-      "include": [
-        "\\.test\\.ts$"
-      ],
+      "roots": ["packages/livestore/tests"],
+      "include": ["\\.test\\.ts$"],
       "exclude": [
         "/tests/ssr/",
         "/tests/conformance/",
@@ -52,7 +44,7 @@
       "arch": "any",
       "packageManager": "pnpm@11.15.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "08ea74c2a7a1ee803924caf6fab7f7b1cd9b7444a0b17658892b2b37707aa3c0"
+      "lockfileSha256": "be9e6f5a076f15bea7eae800e4b9b6b33b3f7a14afadbe0fe2ec6257b462eef0"
     }
   },
   "lanes": [
@@ -92,7 +84,7 @@
         {
           "path": "scripts/react-parity/run-pristine.mjs",
           "role": "support",
-          "sha256": "131c7cb8e8f9ee1f57af3691acf7442a94a29ad628f22beec0afc2f7aa16757e"
+          "sha256": "b22925d67cfa0bed1b0b7fbcdd1a4e924b588d9724dd5b33ac4072df8f317a62"
         },
         {
           "path": "packages/livestore/tests/upstream-vitest.config.ts",
@@ -186,7 +178,7 @@
       "environment": "workspace-node",
       "project": "livestore-adapted-types",
       "evidenceOrigin": "repo-authored",
-      "notes": "Octane public type probes with matching negative controls after the permitted ReactNode\u2192OctaneNode transformation.",
+      "notes": "Octane public type probes with matching negative controls after the permitted ReactNode→OctaneNode transformation.",
       "execution": {
         "kind": "typescript",
         "compiler": "tsrx-tsc",

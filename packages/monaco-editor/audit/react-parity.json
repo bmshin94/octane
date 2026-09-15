@@ -17,21 +17,13 @@
   },
   "adaptedRoots": {
     "source": {
-      "roots": [
-        "packages/monaco-editor/src"
-      ],
-      "include": [
-        "\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"
-      ],
+      "roots": ["packages/monaco-editor/src"],
+      "include": ["\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"],
       "exclude": []
     },
     "tests": {
-      "roots": [
-        "packages/monaco-editor/tests/upstream"
-      ],
-      "include": [
-        "\\.(?:test|spec)\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"
-      ],
+      "roots": ["packages/monaco-editor/tests/upstream"],
+      "include": ["\\.(?:test|spec)\\.(?:[cm]?[jt]s|[jt]sx|tsrx)$"],
       "exclude": []
     }
   },
@@ -48,7 +40,7 @@
       "arch": "any",
       "packageManager": "pnpm@11.15.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "08ea74c2a7a1ee803924caf6fab7f7b1cd9b7444a0b17658892b2b37707aa3c0"
+      "lockfileSha256": "be9e6f5a076f15bea7eae800e4b9b6b33b3f7a14afadbe0fe2ec6257b462eef0"
     }
   },
   "lanes": [
@@ -88,7 +80,7 @@
         {
           "path": "scripts/react-parity/run-pristine.mjs",
           "role": "support",
-          "sha256": "131c7cb8e8f9ee1f57af3691acf7442a94a29ad628f22beec0afc2f7aa16757e"
+          "sha256": "b22925d67cfa0bed1b0b7fbcdd1a4e924b588d9724dd5b33ac4072df8f317a62"
         },
         {
           "path": "packages/monaco-editor/tests/upstream-pristine.vitest.config.ts",
@@ -213,7 +205,7 @@
       "environment": "workspace-node",
       "project": "monaco-editor-pristine-types",
       "evidenceOrigin": "repo-authored",
-      "notes": "Port-authored React-oracle type probes (groups 1\u20136); upstream ships no typetests.",
+      "notes": "Port-authored React-oracle type probes (groups 1–6); upstream ships no typetests.",
       "execution": {
         "kind": "typescript",
         "compiler": "tsc",
@@ -269,7 +261,7 @@
       "environment": "workspace-node",
       "project": "monaco-editor-adapted-types",
       "evidenceOrigin": "repo-authored",
-      "notes": "Shared groups 1\u20136 plus adapted-only groups 7\u20139 against @octanejs/monaco-editor with tsrx-tsc.",
+      "notes": "Shared groups 1–6 plus adapted-only groups 7–9 against @octanejs/monaco-editor with tsrx-tsc.",
       "execution": {
         "kind": "typescript",
         "compiler": "tsrx-tsc",
@@ -373,24 +365,19 @@
   "divergences": [
     {
       "id": "container-ref",
-      "caseIds": [
-        "runtime:01c65bf4eb0a9c0a"
-      ],
+      "caseIds": ["runtime:01c65bf4eb0a9c0a"],
       "upstreamResult": "Internal MonacoContainer accepts _ref",
       "octaneResult": "Internal MonacoContainer accepts Octane ref",
       "rationale": "Octane has no forwardRef; refs are ordinary props.",
       "classification": "intentional-divergence",
-      "consumerImpact": "None \u2014 _ref was never public.",
+      "consumerImpact": "None — _ref was never public.",
       "migrationGuidance": "No consumer change.",
       "owner": "bindings",
       "reviewCondition": "If upstream exports MonacoContainer publicly with _ref."
     },
     {
       "id": "loading-octane-node",
-      "caseIds": [
-        "runtime:d07e2092dc25c9e0",
-        "runtime:d4a860ff21ebcdec"
-      ],
+      "caseIds": ["runtime:d07e2092dc25c9e0", "runtime:d4a860ff21ebcdec"],
       "upstreamResult": "loading?: ReactNode",
       "octaneResult": "loading?: OctaneNode | string",
       "rationale": "Octane renderable type.",

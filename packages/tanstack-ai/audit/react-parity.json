@@ -50,7 +50,7 @@
       "arch": "any",
       "packageManager": "pnpm@11.15.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "08ea74c2a7a1ee803924caf6fab7f7b1cd9b7444a0b17658892b2b37707aa3c0"
+      "lockfileSha256": "be9e6f5a076f15bea7eae800e4b9b6b33b3f7a14afadbe0fe2ec6257b462eef0"
     }
   },
   "lanes": [
@@ -1946,7 +1946,7 @@
         {
           "path": "packages/tanstack-ai/tests/conformance/ui-hydration.test.ts",
           "role": "test",
-          "sha256": "da9dc579dde2453e1ac9f56e29970e1692cc74b7bd4f6fb371aeb8cd595adab0",
+          "sha256": "be0264d1dccc675cf45b671c9ac033d24e014fd7062ed9ed1c854a45bd67aaf6",
           "cases": [
             {
               "id": "conformance:ai-ui-hydration",

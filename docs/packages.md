@@ -44,7 +44,7 @@ All publishable packages share the enforced Node.js engine baseline `>=22.22.2`.
 | `@octanejs/floating-ui` | [`packages/floating-ui`](../packages/floating-ui) | framework binding | `0.1.52` | 1 |
 | `@octanejs/formisch` | [`packages/formisch`](../packages/formisch) | framework binding | `0.0.7` | 1 |
 | `@octanejs/gsap` | [`packages/gsap`](../packages/gsap) | framework binding | `0.0.21` | 1 |
-| `@octanejs/hook-form` | [`packages/hook-form`](../packages/hook-form) | framework binding | `0.1.49` | 1 |
+| `@octanejs/hook-form` | [`packages/hook-form`](../packages/hook-form) | framework binding | `0.1.49` | 2 |
 | `@octanejs/html-react-parser` | [`packages/html-react-parser`](../packages/html-react-parser) | framework binding | `0.0.8` | 2 |
 | `@octanejs/i18next` | [`packages/i18next`](../packages/i18next) | framework binding | `0.1.47` | 3 |
 | `@octanejs/image-crop` | [`packages/image-crop`](../packages/image-crop) | framework binding | `0.0.8` | 5 |
@@ -60,7 +60,7 @@ All publishable packages share the enforced Node.js engine baseline `>=22.22.2`.
 | `@octanejs/markdown` | [`packages/markdown`](../packages/markdown) | framework binding | `0.0.18` | 1 |
 | `@octanejs/mcp-server` | [`packages/octane-mcp-server`](../packages/octane-mcp-server) | agent tooling | `0.2.29` | 2 |
 | `@octanejs/mdx` | [`packages/mdx`](../packages/mdx) | framework binding | `0.1.49` | 4 |
-| `@octanejs/mobx` | [`packages/mobx`](../packages/mobx) | framework binding | `0.1.33` | 1 |
+| `@octanejs/mobx` | [`packages/mobx`](../packages/mobx) | framework binding | `0.1.33` | 2 |
 | `@octanejs/monaco-editor` | [`packages/monaco-editor`](../packages/monaco-editor) | framework binding | `0.0.20` | 1 |
 | `@octanejs/motion` | [`packages/motion`](../packages/motion) | framework binding | `0.1.52` | 2 |
 | `@octanejs/nuqs` | [`packages/nuqs`](../packages/nuqs) | framework binding | `0.1.41` | 7 |

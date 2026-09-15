@@ -10,9 +10,16 @@
     "integrity": "sha256:afc69e121c7f845dbc6bf88e584c5a7a74154c3e2b89c35ce42b3b3bb93d86ce",
     "verification": "verified"
   },
-  "upstreamSuites": { "runtime": "present", "types": "insufficient" },
+  "upstreamSuites": {
+    "runtime": "present",
+    "types": "insufficient"
+  },
   "adaptedRoots": {
-    "source": { "roots": ["packages/pdf/src"], "include": ["\\.(?:ts|tsrx)$"], "exclude": [] },
+    "source": {
+      "roots": ["packages/pdf/src"],
+      "include": ["\\.(?:ts|tsrx)$"],
+      "exclude": []
+    },
     "tests": {
       "roots": ["packages/pdf/tests/runtime"],
       "include": ["\\.test\\.ts$"],
@@ -32,7 +39,7 @@
       "arch": "any",
       "packageManager": "pnpm@11.15.1",
       "lockfile": "pnpm-lock.yaml",
-      "lockfileSha256": "08ea74c2a7a1ee803924caf6fab7f7b1cd9b7444a0b17658892b2b37707aa3c0"
+      "lockfileSha256": "be9e6f5a076f15bea7eae800e4b9b6b33b3f7a14afadbe0fe2ec6257b462eef0"
     }
   },
   "lanes": [
