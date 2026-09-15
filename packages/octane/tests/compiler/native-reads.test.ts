@@ -34,6 +34,27 @@ const modes = [
 ] as const;
 
 describe('automatic native signal compilation', () => {
+	it.each(modes)('accepts CSS keys in logical native style expressions in %j', (options) => {
+		for (const expression of [
+			'props.open && { left: count$ }',
+			'props.style || { left: count$ }',
+			'props.style ?? { left: count$ }',
+			'(props.open && { left: count$ }) || { right: count$ }',
+		]) {
+			const source = `${PREFIX}
+export function App(props) @{ <div style={${expression}} /> }`;
+			expect(() => compile(source, FILENAME, options)).not.toThrow();
+		}
+		// An object used only as the condition never supplies the host style.
+		expect(() =>
+			compile(
+				`${PREFIX} export function App() @{ <div style={{ left: count$ } && {}} /> }`,
+				FILENAME,
+				options,
+			),
+		).toThrow(NAMING);
+	});
+
 	it.each(['universal', 'valdi'])(
 		'compiles ordinary $ names on the %s renderer without a signals import',
 		(target) => {
@@ -298,7 +319,7 @@ function readCount$() { return scope.get(count$); }
 		expect(() => compile(source, FILENAME, {})).toThrow(MEMO_READ);
 	});
 
-	it.each(modes)('accepts inferred native memo reads in %j', (options) => {
+	it.each(modes)('validates inferred native memo reads and Strong hook policy in %j', (options) => {
 		const source = app(
 			`const value = useMemo(() => scope.get(count$));
 const alias = memo(readCount$);
@@ -308,7 +329,11 @@ import * as Octane from 'octane';
 ${PREFIX}
 function readCount$() { return scope.get(count$); }`,
 		);
-		expect(() => compile(source, FILENAME, { ...options })).not.toThrow();
+		if ('strong' in options && options.strong) {
+			expect(() => compile(source, FILENAME, { ...options })).toThrow('OCTANE_STRONG_MANUAL_MEMO');
+		} else {
+			expect(() => compile(source, FILENAME, { ...options })).not.toThrow();
+		}
 	});
 
 	it('diagnoses a live read inside a memoized JSX result', () => {
