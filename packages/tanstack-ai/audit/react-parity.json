@@ -17,23 +17,13 @@
   },
   "adaptedRoots": {
     "source": {
-      "roots": [
-        "packages/tanstack-ai/src"
-      ],
-      "include": [
-        "\\.(?:ts|tsrx)$"
-      ],
-      "exclude": [
-        "\\.d\\.ts$"
-      ]
+      "roots": ["packages/tanstack-ai/src"],
+      "include": ["\\.(?:ts|tsrx)$"],
+      "exclude": ["\\.d\\.ts$"]
     },
     "tests": {
-      "roots": [
-        "packages/tanstack-ai/tests/upstream"
-      ],
-      "include": [
-        "\\.test\\.tsx?$"
-      ],
+      "roots": ["packages/tanstack-ai/tests/upstream"],
+      "include": ["\\.test\\.tsx?$"],
       "exclude": []
     }
   },

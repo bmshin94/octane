@@ -17,21 +17,13 @@
   },
   "adaptedRoots": {
     "source": {
-      "roots": [
-        "packages/jotai/src"
-      ],
-      "include": [
-        "\\.(?:ts|tsrx)$"
-      ],
+      "roots": ["packages/jotai/src"],
+      "include": ["\\.(?:ts|tsrx)$"],
       "exclude": []
     },
     "tests": {
-      "roots": [
-        "packages/jotai/tests/upstream"
-      ],
-      "include": [
-        "\\.test\\.(?:ts|tsx)$"
-      ],
+      "roots": ["packages/jotai/tests/upstream"],
+      "include": ["\\.test\\.(?:ts|tsx)$"],
       "exclude": []
     }
   },
@@ -219,9 +211,7 @@
         "kind": "typescript",
         "compiler": "tsc",
         "project": "packages/jotai/tsconfig.pristine.json",
-        "compilerBins": [
-          "packages/jotai/node_modules/typescript/bin/tsc"
-        ]
+        "compilerBins": ["packages/jotai/node_modules/typescript/bin/tsc"]
       },
       "files": [
         {
