@@ -435,14 +435,19 @@ function nativeStyleBody(props: { el: HTMLElement | SVGElement; value: any }, sc
  * A style binding owns reads in a normal scheduled Block, but owns no DOM range.
  * The enclosing template owns the host and its children. Reusing the native
  * read driver keeps speculative subscriptions, errors, and adoption transactional.
+ *
+ * The binding is keyed by a compile-time slot index on `owner.slots` so that a
+ * suspend-and-retry during mount recovers the existing binding instead of
+ * registering a duplicate block.
  * @internal
  */
 export function nativeStyleBinding(
 	owner: Scope,
-	binding: NativeStyleBinding | undefined,
+	slotKey: number,
 	el: HTMLElement | SVGElement,
 	value: any,
-): NativeStyleBinding {
+): void {
+	let binding = owner.slots[slotKey] as NativeStyleBinding | undefined;
 	if (binding === undefined) {
 		const block = createBlock('control-flow', owner.block, el, null, null, nativeStyleBody, {
 			el,
@@ -455,13 +460,13 @@ export function nativeStyleBinding(
 			__teardown: disposeNativeStyleBinding,
 			block,
 		};
+		owner.slots[slotKey] = binding;
 		registerSlot(owner, binding);
 	} else {
 		journalRootProperty(binding.block!, 'props', binding.block!.props);
 		binding.block!.props = { el, value };
 	}
 	renderBlock(binding.block!);
-	return binding;
 }
 
 /** @internal Enable invocation collection before an opted-in module renders. */

@@ -23124,6 +23124,24 @@ function planJsx(
 	// these text mounts and flush them AFTER every walk has been emitted, so all navigation
 	// happens on the intact template. (Regression: StoryRow's `.meta` interleaves text holes
 	// with `<Link>` components.)
+	// Pre-allocate scope slot indices for native style bindings so that the
+	// binding survives a suspend-and-retry during mount (the same scope.slots[key]
+	// mechanism constructs use). Slots sit after constructs and head hoists.
+	{
+		const _constructCount =
+			forCalls.length +
+			ifCalls.length +
+			compCalls.length +
+			ctx._portalCalls.length +
+			tryCalls.length +
+			ctx._switchCalls.length;
+		const _headHoistCount = headNodes.length + (ctx._nestedHeadHoists ?? []).length;
+		const _nsSlotBase = (noTemplate ? 0 : 1) + _constructCount + _headHoistCount;
+		let _nsIdx = 0;
+		for (const _b of elementBindings) {
+			if (_b.kind === 'nativeStyle') _b.slotIndex = _nsSlotBase + _nsIdx++;
+		}
+	}
 	const deferredTextMounts = [];
 	// Emit per-binding mount code.
 	for (const b of elementBindings) {
@@ -24716,13 +24734,7 @@ function emitBindingMount(bind, elVar, bag) {
 			return st(
 				b.block([
 					...mountHost(),
-					b.stmt(
-						b.assignment(
-							'=',
-							local(`_native$${bind.id}`),
-							b.call(bind.helper, b.id('__s'), undefinedNode(), el(), bind.expr),
-						),
-					),
+					b.stmt(b.call(bind.helper, b.id('__s'), b.literal(bind.slotIndex), el(), bind.expr)),
 				]),
 			);
 		}
@@ -25113,7 +25125,9 @@ function emitBindingUpdate(bind, bag, inlineBindingGuards = false) {
 	const nameLit = () => attrLoweringToken(b.literal(bind.name), bind);
 	switch (bind.kind) {
 		case 'nativeStyle': {
-			return st(b.stmt(b.call(bind.helper, b.id('__s'), F('_native'), F('_el'), bind.expr)));
+			return st(
+				b.stmt(b.call(bind.helper, b.id('__s'), b.literal(bind.slotIndex), F('_el'), bind.expr)),
+			);
 		}
 		case 'nativeChangeRuntime': {
 			return st(b.stmt(b.call('_$queueNativeChangeDiagnostic', F('_el'))));
