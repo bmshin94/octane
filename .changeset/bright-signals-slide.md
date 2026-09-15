@@ -1,6 +1,8 @@
 ---
 'octane': patch
 '@octanejs/mcp-server': patch
+'@octanejs/email': patch
+'@octanejs/textarea-autosize': patch
 '@octanejs/calendar': patch
 '@octanejs/floating-ui': patch
 '@octanejs/image-crop': patch
