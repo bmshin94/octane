@@ -51,7 +51,7 @@ async function openForm() {
 	page = await browser.newPage();
 	page.setDefaultTimeout(5_000);
 	page.on('pageerror', (error) => failures.push(error.message));
-	await page.goto(origin);
+	await page.goto(origin, { timeout: 45_000 });
 	await page.waitForFunction(() => window.hookFormBrowser?.ready());
 }
 

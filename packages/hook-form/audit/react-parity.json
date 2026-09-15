@@ -580,8 +580,8 @@
           "cases": [
             {
               "id": "differential:register",
-              "testName": "register: typing → per-keystroke validation → submit → reset renders byte-identical",
-              "fullName": "differential: @octanejs/hook-form vs real react-hook-form register: typing → per-keystroke validation → submit → reset renders byte-identical"
+              "testName": "register: typing \u2192 per-keystroke validation \u2192 submit \u2192 reset renders byte-identical",
+              "fullName": "differential: @octanejs/hook-form vs real react-hook-form register: typing \u2192 per-keystroke validation \u2192 submit \u2192 reset renders byte-identical"
             },
             {
               "id": "differential:controller",
@@ -753,7 +753,7 @@
               "fullName": "validates native edits, preserves surviving array inputs, focuses appended fields, and cleans up"
             }
           ],
-          "sha256": "c397404184f738dc662e64d0cb9cdf65ed6b8881007fc00ddf33b061709d1a43"
+          "sha256": "8187613864222bde16b73f651b535cd6fd8a2d87fe8d2059ecbcee184efab83e"
         }
       ]
     },
