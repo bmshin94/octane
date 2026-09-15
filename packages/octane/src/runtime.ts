@@ -19,6 +19,9 @@
 // a browser app that has no `@types/node`.
 declare const process: { env: { NODE_ENV?: string } };
 
+import { resolveHookPath } from './hook-slot-cache.js';
+import { bumpContextEpoch, contextEpochNow } from './context-epoch.js';
+
 import {
 	SUSPENSE_SCRIPT_ATTR,
 	SUSPENSE_RESOLVED_COMMENT,
@@ -343,6 +346,8 @@ export interface Scope {
 	// (vs. the old `scope[`_for$N`]` dynamic string keys) keeps the Scope object shape
 	// MONOMORPHIC: bindings no longer mutate the scope's hidden class per component.
 	slots: any[];
+	/** Lazy compiler-owned memo regions, independent of the dense DOM/control slots. */
+	compilerMemo: CompilerMemoRegion | null;
 	/**
 	 * DEV ONLY (set by `dev`-compiled bodies; `undefined` in production): a structured
 	 * hydration source-location table — `{ slotIndex: [line, column] }` — plus `locFile`,
@@ -353,6 +358,17 @@ export interface Scope {
 	locs?: Record<number, [number, number]>;
 	locFile?: string;
 }
+
+// A compiled body normally owns the only region in its Scope. Context Providers
+// and loaded/lazy bodies can run a second body in that same Scope, so their
+// per-body caches live in a lazily allocated overflow Map instead of aliasing.
+// The fixed record keeps all four fields in-object with one stable V8 map.
+type CompilerMemoRegion = {
+	bodyId: number;
+	auto: any[] | undefined;
+	hooks: any[] | undefined;
+	overflow: Map<number, CompilerMemoRegion> | null;
+};
 
 interface ChildScope {
 	// withScope uses Symbol per call-site; componentSlotLite uses its numeric slot
@@ -657,9 +673,9 @@ function takeNativeFreshArm(
 }
 
 // Production helper/custom-hook ABI: reserve a disjoint numeric range for each
-// evaluated module that needs globally composable Symbol descriptions. Direct
-// sites in compiler-owned render Scopes use smaller local numbers and never call
-// this helper. Evaluation order is irrelevant; reserved ranges never overlap,
+// evaluated module. Base-hook slots and compiler memo regions also need module
+// ownership: Providers and lazy wrappers may run different bodies in one Scope.
+// Evaluation order is irrelevant; reserved ranges never overlap,
 // including duplicate/dynamically loaded module instances.
 let nextHookSlot = 0;
 export function hookSlots(count: number): number {
@@ -1023,6 +1039,17 @@ export interface Block extends Scope {
 	/** Direct (own) context reads this render — drives memo invalidation alongside $$ctxReads. */
 	$$ctxDirect: Map<Context<any>, any> | null;
 	/**
+	 * The context epoch at which this block's $$ctxReads/$$ctxDirect
+	 * entries were last known consistent with live context versions: sampled when
+	 * renderBlock clears the maps (this render repopulates them at current
+	 * versions) and re-stamped after a bailout verifies every recorded entry.
+	 * While it equals the current epoch NO context anywhere has changed since, so
+	 * the per-bail version scans are provably redundant. restampCtxDeps poisons it
+	 * (-1) when it merges a stale version into this block's map, so a still-pending
+	 * consumer refresh can never be masked by the fast path.
+	 */
+	$$ctxDepsEpoch: number;
+	/**
 	 * Armed for React's IMPLICIT same-element bailout (beginWork's
 	 * oldProps === newProps skip). Set at value-position component mounts
 	 * (childSlot); makes the block a context-stamping target like `__memo` so
@@ -1036,7 +1063,9 @@ export interface Block extends Scope {
 	 * many times it rendered within that pass. A block that keeps re-queueing
 	 * itself from its own render body (an unguarded render-phase setState) is a
 	 * non-converging loop — drainQueue throws after RENDER_PHASE_UPDATE_LIMIT,
-	 * mirroring React's "Too many re-renders".
+	 * mirroring React's "Too many re-renders". Negative stamps are transient
+	 * scheduler-sort epochs: drainRenders holds depth until the first render
+	 * resets it under the positive drain id.
 	 */
 	drainStamp: number;
 	drainRenders: number;
@@ -1161,6 +1190,9 @@ let NEXT_WARM_EPISODE = 1;
 let CURRENT_WARM_EPISODE = 0;
 const RENDERER_REGION_OWNER = Symbol.for('octane.renderer-region.owner');
 const RENDERER_REGION_DOM_OWNERS = new WeakMap<Block, RendererRegionOwnerBridge>();
+// Live region-owner roots (WeakMap exposes no size). Ordinary apps never bind
+// one, so this collapses the per-read bridge check to a single integer test.
+let RENDERER_REGION_OWNER_COUNT = 0;
 const RENDERER_REGION_DOM_BINDINGS = new WeakMap<
 	Block,
 	{
@@ -2397,6 +2429,8 @@ const JOURNAL_PROP = 3;
 const JOURNAL_CREATED = 4;
 const JOURNAL_RENDER = 5;
 const JOURNAL_UNDO = 6;
+const JOURNAL_RETIRED = 7;
+const JOURNAL_INPUTS = 8;
 /** Flat undo log, four slots per entry: kind, target, a, b. */
 let TRANSITION_JOURNAL: any[] | null = null;
 /** Bags already captured in the open window, so each is snapshotted once. */
@@ -2639,9 +2673,7 @@ function retireRootBlock(block: Block): void {
 	const retired = (transaction.retired ??= new Set());
 	if (!retired.has(block)) {
 		retired.add(block);
-		journalUndo(() => {
-			retired.delete(block);
-		});
+		TRANSITION_JOURNAL!.push(JOURNAL_RETIRED, retired, block, null);
 	}
 	if (block.pending) {
 		journalRootProperty(block, 'pending', block.pending);
@@ -2802,6 +2834,8 @@ function rollbackRootRender(transaction: RootRenderTransaction): void {
 				if (transaction.log[i] === JOURNAL_UNDO) transaction.log[i + 1]();
 				else if (transaction.log[i] === JOURNAL_CREATED)
 					undoCreatedInRootRender(transaction.log[i + 1], transaction.log[i + 2]);
+				else if (transaction.log[i] === JOURNAL_RETIRED)
+					transaction.log[i + 1].delete(transaction.log[i + 2]);
 			}
 			transaction.log.length = 0;
 		}
@@ -3444,8 +3478,8 @@ function collectBlockRange(block: Block): Node[] {
 	return nodes;
 }
 
-function journalText(node: Text): void {
-	TRANSITION_JOURNAL!.push(JOURNAL_TEXT, node, node.nodeValue, null);
+function journalText(node: Text, previous: string | null): void {
+	TRANSITION_JOURNAL!.push(JOURNAL_TEXT, node, previous, null);
 	journalBag();
 }
 
@@ -3550,8 +3584,15 @@ function rollbackTransitionJournal(checkpoint: number, owner: Block): void {
 			case JOURNAL_PROP:
 				(target as any)[a] = b;
 				break;
+			case JOURNAL_INPUTS:
+				(target as Block).extra = b;
+				(target as Block).props = a;
+				break;
 			case JOURNAL_CREATED:
 				undoCreatedInRootRender(target as Block, a as RootRenderTransaction);
+				break;
+			case JOURNAL_RETIRED:
+				(target as Set<Block>).delete(a as Block);
 				break;
 			case JOURNAL_RENDER:
 				if (!target.disposed && (target === owner || blockIsAncestorOf(owner, target))) {
@@ -3562,10 +3603,25 @@ function rollbackTransitionJournal(checkpoint: number, owner: Block): void {
 				target();
 				break;
 			default:
-				for (const key of Object.keys(target)) {
-					if (!Object.prototype.hasOwnProperty.call(a, key)) delete target[key];
+				// Spread snapshots include enumerable symbols as well as strings.
+				// Leave non-enumerable state outside the snapshot, including an
+				// array's length, which has its own restoration below.
+				for (const key of Reflect.ownKeys(target)) {
+					if (
+						!Object.prototype.hasOwnProperty.call(a, key) &&
+						Object.prototype.propertyIsEnumerable.call(target, key)
+					)
+						delete target[key];
 				}
-				for (const key of Object.keys(a)) target[key] = a[key];
+				for (const key of Reflect.ownKeys(a)) {
+					// Symbol constants were never assigned by the string-only path.
+					// Keep an unchanged read-only symbol valid while still invoking
+					// symbol setters and rejecting a value that cannot be restored.
+					if (typeof key === 'symbol') {
+						if (Reflect.set(target, key, a[key]) || Object.is(target[key], a[key])) continue;
+					}
+					target[key] = a[key];
+				}
 				if (b !== null) target.length = b;
 				// This bag is back to its pre-window values, so a later write in an
 				// enclosing window has to snapshot it again rather than trust the
@@ -4200,6 +4256,8 @@ interface StoreInst<T> {
 	pending: T;
 	/** The subscribe last seen at enqueue — a store swap re-arms the tear check. */
 	subscribe: (onStoreChange: () => void) => () => void;
+	/** Immutable passive-effect deps, replaced only when subscribe changes. */
+	effectDeps: [StoreInst<T>, (onStoreChange: () => void) => () => void] | null;
 	/** Force a re-render of the owning block (same path as a useState setter). */
 	forceUpdate: () => void;
 	/** Stable notify handler handed to subscribe(); re-renders iff the snapshot
@@ -4261,7 +4319,7 @@ function attachLiveFragmentRef(instance: FragmentInstance): void {
 // single-threaded, so every effect enqueued while the buffer is set belongs to the WIP.
 interface OffscreenCapture {
 	/** Root journals already record render validity without a second subtree set. */
-	rootTransaction?: boolean;
+	rootTransaction: boolean;
 	/** Executed bodies whose output/commit work is reusable only if this capture survives. */
 	renderRoot: Block | null;
 	renderedBlocks: Set<Block> | null;
@@ -4269,16 +4327,16 @@ interface OffscreenCapture {
 	events: PendingEffectEvent[];
 	eventActions: EffectEventCommitAction[];
 	refs: RefAttach[];
-	detaches?: any[];
+	detaches: any[] | undefined;
 	// uSES store-syncs enqueued during this off-screen render (see storeSyncQueue).
 	// Spliced into the live queue on commit, dropped on dispose — a WIP that never
 	// lands must not mutate a committed inst (its inst is fresh anyway, per the
 	// fresh-block render, so dropping is both correct and cheap).
 	stores: StoreInst<any>[];
 	/** Suspense visibility changes become recent only when this capture commits. */
-	suspenseCommits?: Set<TrySlot>;
+	suspenseCommits: Set<TrySlot> | undefined;
 	/** Speculative renderer transactions are released only after commit or discard. */
-	renderCleanups?: Array<(discarded: boolean) => void>;
+	renderCleanups: Array<(discarded: boolean) => void> | undefined;
 }
 let WIP_CAPTURE: OffscreenCapture | null = null;
 // Ordinary roots also capture commit work. Keep their generic publication path
@@ -4309,13 +4367,17 @@ export function scheduleRenderCleanup(
 
 function createOffscreenCapture(): OffscreenCapture {
 	return {
+		rootTransaction: false,
 		renderRoot: null,
 		renderedBlocks: null,
 		effects: [[], [], []],
 		events: [],
 		eventActions: [],
 		refs: [],
+		detaches: undefined,
 		stores: [],
+		suspenseCommits: undefined,
+		renderCleanups: undefined,
 	};
 }
 
@@ -4621,34 +4683,41 @@ function drainHydrationRenderPhaseUpdates(root: Block): void {
 	}
 }
 
-// Sort a render wave shallow-first (ancestors before descendants). If A is an
-// ancestor of B then depth(A) < depth(B), so A renders first and its cascade can
-// clear B's `pending` (skipping B's redundant standalone render) regardless of
-// the order their setStates were queued. Depths are precomputed so the comparator
-// doesn't re-walk the chain on every compare. Resolve each unknown path to its
-// nearest cached queued ancestor, retaining depths only for blocks in this wave.
-function sortWaveByDepth(wave: Block[]): Block[] {
-	const queued = new Set(wave);
-	const depth = new Map<Block, number>();
-	const path: Block[] = [];
+// Sort a render wave shallow-first so an ancestor can consume or remove queued
+// descendants before their standalone updates. No user code runs during this
+// sort. Negative drain stamps temporarily reuse the loop-guard fields for depth;
+// the positive drain id resets them to a render count before executing a block.
+// Cache every real ancestor for this wave, including unqueued intermediates.
+// Two walks over each unknown path avoid allocating a path stack or collections.
+function sortWaveByDepth(wave: Block[], drainId: number): Block[] {
+	const stamp = -drainId;
 	for (let i = 0; i < wave.length; i++) {
-		let current: Block | null = wave[i];
-		let knownDepth: number | undefined;
-		while (current !== null) {
-			knownDepth = depth.get(current);
-			if (knownDepth !== undefined) break;
-			path.push(current);
+		const start = wave[i];
+		if (start.drainStamp === stamp) continue;
+		let current: Block | null = start;
+		let depth = 0;
+		while (current !== null && current.drainStamp !== stamp) {
+			depth++;
 			current = current.parentBlock;
 		}
-		let currentDepth = knownDepth ?? -1;
-		while (path.length > 0) {
-			const block = path.pop()!;
-			currentDepth++;
-			if (queued.has(block)) depth.set(block, currentDepth);
+		depth += current === null ? -1 : current.drainRenders;
+		current = start;
+		while (current !== null && current.drainStamp !== stamp) {
+			// Lite ancestry proxies intentionally have no scheduler fields.
+			if (current.drainStamp !== undefined) {
+				current.drainStamp = stamp;
+				current.drainRenders = depth;
+			}
+			depth--;
+			current = current.parentBlock;
 		}
 	}
-	wave.sort((a, b) => depth.get(a)! - depth.get(b)!);
+	wave.sort(compareWaveDepth);
 	return wave;
+}
+
+function compareWaveDepth(a: Block, b: Block): number {
+	return a.drainRenders - b.drainRenders;
 }
 
 // Visibility-owner scheduling is optional: roots without Suspense or hidden
@@ -4700,7 +4769,7 @@ function drainQueue(): { err: any } | null {
 	let pendingError: { err: any; all: any[] } | null = null;
 	let activitiesToRehide: Set<ActivitySlot> | null = null;
 	const drainId = ++DRAIN_ID;
-	if (QUEUE.length > 1) sortWaveByDepth(QUEUE);
+	if (QUEUE.length > 1) sortWaveByDepth(QUEUE, drainId);
 	// Iterate by index. A render may enqueue MORE work (e.g. a setState during
 	// render) — it appends to QUEUE, and `i < QUEUE.length` is re-evaluated every
 	// step, so those are drained in this same pass. The loop only exits once i has
@@ -4782,6 +4851,10 @@ function drainQueue(): { err: any } | null {
 			// retries the render; if it no longer suspends (an external store flipped
 			// before the suspending promise resolved), the boundary reveals now.
 			if (hiddenTry !== null) {
+				// The retry starts at the boundary, not this scheduled descendant.
+				// Preserve its changed input through equal-props ancestor bailouts,
+				// including retries that suspend before reaching the child again.
+				invalidateRender(block, hiddenTry.tryBlock);
 				visibilityDriver!.reveal(hiddenTry, block.pendingMode ?? 'urgent');
 				continue;
 			}
@@ -5811,7 +5884,17 @@ function drainRefAttaches(): void {
 	const q = refAttachQueue.splice(0);
 	// ES stable sort preserves the queue's DFS/source order for disjoint subtrees;
 	// comparePostOrder moves only descendants ahead of their queued ancestors.
-	q.sort((a, b) => comparePostOrder(a.block, 0, b.block, 0));
+	// Entries with one immediate parent are siblings (or on the same block), so
+	// every comparison is zero and their existing queue order is already final.
+	if (q.length > 1) {
+		const parent = q[0].block?.parentBlock ?? null;
+		for (let i = 1; i < q.length; i++) {
+			if ((q[i].block?.parentBlock ?? null) !== parent) {
+				q.sort(compareRefPostOrder);
+				break;
+			}
+		}
+	}
 	for (const r of q) {
 		// Skip attaches whose owning subtree was unmounted earlier in THIS flush
 		// (e.g. a try boundary caught a mount-time throw and ran unmountBlock +
@@ -6288,6 +6371,9 @@ function compareEffectPostOrder(a: PendingEffect, b: PendingEffect): number {
 	if (a.scope === b.scope) return a.order - b.order || a.seq - b.seq;
 	return comparePostOrder(a.scope.block, a.seq, b.scope.block, b.seq);
 }
+function compareRefPostOrder(a: RefAttach, b: RefAttach): number {
+	return comparePostOrder(a.block, 0, b.block, 0);
+}
 
 function finishEffectCommit(): void {
 	if (--EFFECT_COMMIT_DEPTH !== 0 || COMMIT_PHASE_ERRORS === null) return;
@@ -6737,6 +6823,9 @@ class BlockImpl {
 	// version here means THIS block must re-run; if only $$ctxReads changed, the
 	// block can bail its body and refresh just its consuming child blocks.
 	declare $$ctxDirect: Map<Context<any>, any> | null;
+	// Epoch stamp for the two dep maps — see Block.$$ctxDepsEpoch. Number so the
+	// "unverified" poison (-1) stays inside the same monomorphic field type.
+	declare $$ctxDepsEpoch: number;
 	// Resolved-provider cache for `use(ctx)` — see Scope.$$ctxCache.
 	declare $$ctxCache: Context<any> | Map<Context<any>, Scope | typeof DEFAULT_CTX> | null;
 	declare $$ctxCacheOwner: Scope | typeof DEFAULT_CTX | null;
@@ -6765,6 +6854,7 @@ class BlockImpl {
 	// Per-scope dense slot array (binding bag + control-flow/component/child slots),
 	// indexed by compile-time slot index. Keeps the scope shape monomorphic.
 	declare slots: any[];
+	declare compilerMemo: CompilerMemoRegion | null;
 	// For-block item bookkeeping.
 	declare forSlot: ForSlot | null;
 	declare prevSibling: Block | null;
@@ -6835,6 +6925,7 @@ class BlockImpl {
 		this.$$ctxValues = null;
 		this.$$ctxReads = null;
 		this.$$ctxDirect = null;
+		this.$$ctxDepsEpoch = -1;
 		this.$$ctxCache = null;
 		this.$$ctxCacheOwner = null;
 		this.$$implicitBail = false;
@@ -6850,6 +6941,7 @@ class BlockImpl {
 		this.deoptNode = null;
 		this.deoptRefs = false;
 		this.slots = [];
+		this.compilerMemo = null;
 		this.forSlot = null;
 		this.prevSibling = null;
 		this.nextSibling = null;
@@ -6900,6 +6992,7 @@ class ScopeImpl {
 	// Per-scope dense slot array (binding bag + control-flow/component/child slots),
 	// indexed by compile-time slot index. Keeps the scope shape monomorphic.
 	declare slots: any[];
+	declare compilerMemo: CompilerMemoRegion | null;
 
 	constructor(parent: Scope, block: Block) {
 		this.block = block;
@@ -6916,6 +7009,7 @@ class ScopeImpl {
 		this.$$ctxCacheOwner = null;
 		this.mounted = false;
 		this.slots = [];
+		this.compilerMemo = null;
 	}
 }
 
@@ -7204,10 +7298,16 @@ function renderBlockInner(block: Block): true | undefined {
 		(block as any).__thenableDone = false;
 	}
 	// Clear last render's recorded context dependencies; this render repopulates
-	// them (its own reads + descendant reads propagated up). Only memo blocks
-	// ever hold a non-null map, so this is a no-op for the common case.
+	// them (its own reads + descendant reads propagated up). Only memo/armed
+	// blocks ever hold a non-null map, so this is a no-op for the common case.
 	if (block.$$ctxReads !== null) block.$$ctxReads.clear();
 	if (block.$$ctxDirect !== null) block.$$ctxDirect.clear();
+	// Stamp the dep maps' consistency epoch: entries written during this render
+	// record live versions, so while the global epoch still equals this sample
+	// no recorded dep can be stale. Sampling at the TOP is deliberate — a
+	// provider commit mid-render advances the epoch past this stamp, so the
+	// bail scans still run and see any mixed-version entries.
+	block.$$ctxDepsEpoch = contextEpochNow();
 	// Capture the render priority. Explicit pendingMode (set by scheduleRender)
 	// wins. Otherwise INHERIT from the outer block — re-entrant renders (try,
 	// if, for, comp slots) called synchronously inside an outer body should
@@ -7680,6 +7780,25 @@ export function componentSlotLite<P>(
 	anchor?: Node,
 ): void {
 	if (CURRENT_BLOCK?.pending && !CURRENT_BLOCK.crossRenderUpdate) return;
+	// Providers and lazy wrappers can execute independently compiled bodies in
+	// the same Scope. Their direct children need an identity-aware slot, including
+	// when one body selected the lite representation and another selected full.
+	if (parentScope === SHARED_BODY_SCOPE) {
+		componentSlotImpl(
+			null,
+			parentScope,
+			slotKey,
+			host,
+			comp,
+			comp,
+			props,
+			props,
+			anchor,
+			undefined,
+			2,
+		);
+		return;
+	}
 	const hydration = activeHydration();
 	let scope = parentScope.slots[slotKey] as Scope | undefined;
 	// The server `<!--]-->` this call adopted as its range end (hydration first
@@ -8230,10 +8349,7 @@ function resolveSlot(slot: HookSlot | undefined): HookSlot | undefined {
 	const n = slotStack.length;
 	if (n === 0) return slot;
 	if (slot === undefined && n === 1) return slotStack[0];
-	let key = '@octane:hook:';
-	for (let i = 0; i < n; i++) key = appendSlotKey(key, slotStack[i]);
-	if (slot !== undefined) key = appendSlotKey(key, slot);
-	const resolved = Symbol.for(key);
+	const resolved = resolveHookPath(slotStack, slot, false);
 	return typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__
 		? __profileResolveHook(resolved, typeof slot === 'symbol' ? slot : undefined)
 		: resolved;
@@ -8263,15 +8379,15 @@ interface StateSlot<T> {
 	value: T;
 	setter: (next: T | ((prev: T) => T)) => void;
 	/** Queued functional work is evaluated in the owner's next render. */
-	updates?: Array<T | ((previous: T) => T)>;
+	updates: Array<T | ((previous: T) => T)> | undefined;
 	/** Promoted transition work folds with the inputs of the rendering owner. */
-	renderTransition?: TransitionActionUpdate<T>;
+	renderTransition: TransitionActionUpdate<T> | undefined;
 	/** An urgent ancestor reads queued urgent operations without consuming the transition. */
-	urgentTransition?: boolean;
+	urgentTransition: boolean | undefined;
 	/** Allocated only for compiler-selected third-tuple consumers. */
-	getter?: () => T;
-	pendingActionBatch?: TransitionActionBatch;
-	pendingActionValue?: T;
+	getter: (() => T) | undefined;
+	pendingActionBatch: TransitionActionBatch | undefined;
+	pendingActionValue: T | undefined;
 }
 
 type StateSetter<T> = (next: T | ((prev: T) => T)) => void;
@@ -8280,6 +8396,17 @@ type StateTuple<T> = [T, StateSetter<T>, () => T];
 export function useState<T = undefined>(): StateTuple<T | undefined>;
 export function useState<T>(initial: T | (() => T), slot?: symbol): StateTuple<T>;
 export function useState<T>(initial?: T | (() => T), slot?: HookSlot): StateTuple<T> {
+	const s = readStateHook(initial, slot, arguments.length === 1);
+	// The compiler selects the getter variant only when the third member is observed.
+	return [s.value, s.setter] as unknown as StateTuple<T>;
+}
+
+/** Both tuple forms consume the same resolved cell without a second hook lookup. */
+function readStateHook<T>(
+	initial: T | (() => T) | undefined,
+	slot: HookSlot | undefined,
+	loneArgument: boolean,
+): StateSlot<T> {
 	// Compiled base calls supply the slot separately, padding omitted initial
 	// values with undefined. Manual providers retain the legacy lone-slot form;
 	// automatic aliases (including bound/forwarding functions) receive authored
@@ -8288,7 +8415,7 @@ export function useState<T>(initial?: T | (() => T), slot?: HookSlot): StateTupl
 	if (
 		slot === undefined &&
 		typeof initial === 'symbol' &&
-		arguments.length === 1 &&
+		loneArgument &&
 		(slotStack.length === 0 || MANUAL_HOOK_DRIVER?.active === true)
 	) {
 		slot = initial as unknown as symbol;
@@ -8387,6 +8514,12 @@ export function useState<T>(initial?: T | (() => T), slot?: HookSlot): StateTupl
 					__profileSchedule(block, 'state', slot);
 				scheduleRender(block);
 			},
+			updates: undefined,
+			renderTransition: undefined,
+			urgentTransition: undefined,
+			getter: undefined,
+			pendingActionBatch: undefined,
+			pendingActionValue: undefined,
 		};
 		ensureHooks(scope).set(slot, s);
 	}
@@ -8403,10 +8536,7 @@ export function useState<T>(initial?: T | (() => T), slot?: HookSlot): StateTupl
 			s.updates = undefined;
 		}
 	}
-	// Source-level useState has a third getState member, but this physical base
-	// path stays allocation-free. The compiler selects __useStateWithGetter only
-	// when index 2 can be observed (including escaped or ambiguous tuples).
-	return [s.value, s.setter] as unknown as StateTuple<T>;
+	return s;
 }
 
 function readQueuedState<T>(state: StateSlot<T>): T {
@@ -8532,21 +8662,7 @@ type _UseStateAcceptsNoArguments = AssertUseStateType<
 /** Compiler-emitted useState variant for a tuple whose third member is observable. */
 export function __useStateWithGetter<T>(initial: T | (() => T), slot?: symbol): StateTuple<T>;
 export function __useStateWithGetter<T>(initial: T | (() => T), slot?: HookSlot): StateTuple<T> {
-	// Normalize the legacy lone-slot form before delegating so the getter looks
-	// up the same cell. Aliases inside a path retain their authored initial value.
-	if (
-		slot === undefined &&
-		typeof initial === 'symbol' &&
-		arguments.length === 1 &&
-		(slotStack.length === 0 || MANUAL_HOOK_DRIVER?.active === true)
-	) {
-		slot = initial as unknown as symbol;
-		initial = undefined as T;
-	}
-	const pair = (useState as any)(initial, slot) as StateTuple<T>;
-	const resolved = resolveSlot(slot);
-	if (resolved === undefined) missingSlot('useState');
-	const s = CURRENT_SCOPE!.hooks!.get(resolved) as StateSlot<T>;
+	const s = readStateHook(initial, slot, arguments.length === 1);
 	const getter =
 		s.getter ??
 		(s.getter = () => {
@@ -8555,7 +8671,7 @@ export function __useStateWithGetter<T>(initial: T | (() => T), slot?: HookSlot)
 			const update = batch.updates.get(s) as TransitionActionUpdate<T> | undefined;
 			return update === undefined ? readQueuedState(s) : readQueuedTransition(update, false);
 		});
-	return [pair[0], pair[1], getter];
+	return [s.value, s.setter, getter];
 }
 
 /** The last successfully published source and its locally editable value. */
@@ -8897,14 +9013,14 @@ interface ReducerSlot<S, A> {
 	dispatch: (action: A) => void;
 	reducer: (state: S, action: A) => S;
 	/** Render-phase actions are reduced by the reducer from the replaying render. */
-	renderPhaseActions?: A[];
+	renderPhaseActions: A[] | undefined;
 	/** A promoted Action is reduced with this render's reducer before publication. */
-	renderTransition?: TransitionActionUpdate<S>;
-	urgentTransition?: boolean;
+	renderTransition: TransitionActionUpdate<S> | undefined;
+	urgentTransition: boolean | undefined;
 	/** Allocated only for compiler-selected third-tuple consumers. */
-	getter?: () => S;
-	pendingActionBatch?: TransitionActionBatch;
-	pendingActionValue?: S;
+	getter: (() => S) | undefined;
+	pendingActionBatch: TransitionActionBatch | undefined;
+	pendingActionValue: S | undefined;
 }
 
 type ReducerTuple<S, A> = [S, (action: A) => void, () => S];
@@ -8921,6 +9037,16 @@ export function useReducer<S, A, I = S>(
 	initOrSlot?: ((arg: I) => S) | symbol,
 	slot?: HookSlot,
 ): ReducerTuple<S, A> {
+	const s = readReducerHook(reducer, initialArg, initOrSlot, slot);
+	return [s.value, s.dispatch] as unknown as ReducerTuple<S, A>;
+}
+
+function readReducerHook<S, A, I>(
+	reducer: (s: S, a: A) => S,
+	initialArg: I,
+	initOrSlot: ((arg: I) => S) | symbol | undefined,
+	slot: HookSlot | undefined,
+): ReducerSlot<S, A> {
 	// The compiler appends the hook slot as the final argument. In Symbol builds,
 	// the React 2-arg form `useReducer(reducer, initialState)` arrives as
 	// `(reducer, initialState, slot)`; numeric builds reserve the omitted init
@@ -8995,6 +9121,12 @@ export function useReducer<S, A, I = S>(
 					__profileSchedule(block, 'reducer', slot);
 				scheduleRender(block);
 			},
+			renderPhaseActions: undefined,
+			renderTransition: undefined,
+			urgentTransition: undefined,
+			getter: undefined,
+			pendingActionBatch: undefined,
+			pendingActionValue: undefined,
 		};
 		ensureHooks(scope).set(slot, s);
 	} else {
@@ -9014,9 +9146,7 @@ export function useReducer<S, A, I = S>(
 			}
 		}
 	}
-	// See useState: the compiler selects __useReducerWithGetter whenever the
-	// source can observe the third tuple member.
-	return [s.value, s.dispatch] as unknown as ReducerTuple<S, A>;
+	return s;
 }
 
 function readQueuedReducer<S, A>(state: ReducerSlot<S, A>): S {
@@ -9046,11 +9176,7 @@ export function __useReducerWithGetter<S, A, I = S>(
 	initOrSlot?: ((arg: I) => S) | symbol,
 	slot?: HookSlot,
 ): ReducerTuple<S, A> {
-	const resolvedInput = typeof initOrSlot === 'symbol' ? initOrSlot : slot;
-	const pair = (useReducer as any)(reducer, initialArg, initOrSlot, slot) as ReducerTuple<S, A>;
-	const resolved = resolveSlot(resolvedInput);
-	if (resolved === undefined) missingSlot('useReducer');
-	const s = CURRENT_SCOPE!.hooks!.get(resolved) as ReducerSlot<S, A>;
+	const s = readReducerHook(reducer, initialArg, initOrSlot, slot);
 	const getter =
 		s.getter ??
 		(s.getter = () => {
@@ -9061,7 +9187,7 @@ export function __useReducerWithGetter<S, A, I = S>(
 				? readQueuedReducer(s)
 				: readQueuedTransition(update, false, s.reducer);
 		});
-	return [pair[0], pair[1], getter];
+	return [s.value, s.dispatch, getter];
 }
 
 function depsChanged(prev: any[] | undefined, next: any[] | undefined, hook = false): boolean {
@@ -9290,11 +9416,11 @@ export function useInsertionEffect(fn: EffectFn, deps?: any[] | null, slot?: Hoo
 interface MemoHookEntry<T = any> {
 	deps: any[] | undefined;
 	value: T;
-	warmEpisode?: number;
+	warmEpisode: number | undefined;
 	/** A consumed warm occurrence can return only when this scope is discarded. */
-	warmRecord?: WarmEntry;
-	/** Present only on compiler-owned native-read creation caches. */
-	nativeWitness?: NativeReadWitness | null;
+	warmRecord: WarmEntry | undefined;
+	/** Defined only on compiler-owned native-read creation caches. */
+	nativeWitness: NativeReadWitness | null | undefined;
 }
 
 function memoEntryHit<T>(slot: HookSlot, entry: MemoHookEntry<T>): MemoHookEntry<T> {
@@ -9314,6 +9440,8 @@ function adoptMemoEntry<T>(scope: Scope, slot: HookSlot, deps: any[]): MemoHookE
 		deps,
 		value: adopted.value as T,
 		warmEpisode: CURRENT_WARM_EPISODE,
+		warmRecord: undefined,
+		nativeWitness: undefined,
 	};
 	if (ACTIVE_TRANSITION_ATTEMPT !== null) journalMemoEntry(scope, slot, entry);
 	ensureHooks(scope).set(slot, entry);
@@ -9346,8 +9474,13 @@ function publishMemoEntry<T>(
 	value: T,
 	nativeWitness?: NativeReadWitness | null,
 ): T {
-	const entry: MemoHookEntry<T> = { deps, value };
-	if (nativeWitness !== undefined) entry.nativeWitness = nativeWitness;
+	const entry: MemoHookEntry<T> = {
+		deps,
+		value,
+		warmEpisode: undefined,
+		warmRecord: undefined,
+		nativeWitness,
+	};
 	// The attempt records the replacement both ways: the cue re-render must
 	// dep-hit the old entry (never re-create old-version requests), and the
 	// promoted render must dep-hit this one (never create twice).
@@ -9415,8 +9548,35 @@ export function useCallback<F extends (...args: any[]) => any>(
 /** Compiler-owned intrinsics cannot be shadowed by bindings in an authored body. */
 export const hookMemoEqual = Object.is;
 
+/** @internal The usual compiled body takes the first-region fast path. */
+export function compilerMemoRegion(scope: Scope, bodyId: number): CompilerMemoRegion {
+	const region = scope.compilerMemo;
+	if (region !== null && region.bodyId === bodyId) return region;
+	return createCompilerMemoRegion(scope, bodyId, region);
+}
+
+function createCompilerMemoRegion(
+	scope: Scope,
+	bodyId: number,
+	first: CompilerMemoRegion | null,
+): CompilerMemoRegion {
+	if (first === null)
+		return (scope.compilerMemo = { bodyId, auto: undefined, hooks: undefined, overflow: null });
+	let overflow = first.overflow;
+	if (overflow === null) first.overflow = overflow = new Map();
+	let region = overflow.get(bodyId);
+	if (region === undefined) {
+		region = { bodyId, auto: undefined, hooks: undefined, overflow: null };
+		overflow.set(bodyId, region);
+	}
+	return region;
+}
+
 export function hookMemoCreate(size: number): any[] {
-	return new Array(size).fill(undefined);
+	// Validity cells test for true; invariant callbacks use a nullish check.
+	// A null fill also avoids undefined-double storage becoming holey when the
+	// first published value requires object elements in newer V8 versions.
+	return new Array(size).fill(null);
 }
 
 /** Compiler ABI: publish a successful inline memo computation immediately.
@@ -9781,17 +9941,20 @@ export function useSyncExternalStore<T>(
 export function useSyncExternalStore<T>(
 	subscribe: (onStoreChange: () => void) => () => void,
 	getSnapshot: () => T,
-	...rest: any[]
+	serverSnapshotOrSlot: (() => T) | HookSlot | undefined = undefined,
+	lastSlot?: HookSlot,
 ): T {
 	// React-19 shape: `useSyncExternalStore(subscribe, getSnapshot,
 	// getServerSnapshot?)`. The compiler appends the hook slot as the
-	// LAST argument, so we detect the user-vs-compiler args by counting from
-	// the end. One trailing slot → user passed no getServerSnapshot; one slot
-	// preceded by another arg → user passed getServerSnapshot.
-	let slot = rest[rest.length - 1] as HookSlot | undefined;
+	// LAST argument. Count arguments, including an explicitly passed undefined,
+	// to distinguish an authored server snapshot from the trailing slot without
+	// materializing a rest array on every render.
+	const count = arguments.length;
+	let slot = (count > 4 ? arguments[count - 1] : count === 4 ? lastSlot : serverSnapshotOrSlot) as
+		HookSlot | undefined;
 	slot = resolveSlot(slot);
 	if (slot === undefined) missingSlot('useSyncExternalStore');
-	const getServerSnapshot = rest.length >= 2 ? (rest[0] as () => T) : undefined;
+	const getServerSnapshot = count >= 4 ? (serverSnapshotOrSlot as () => T) : undefined;
 	const subs = usesSubslots(slot);
 
 	// Fresh read on every render — the anti-tearing snapshot. DURING HYDRATION the
@@ -9828,6 +9991,7 @@ export function useSyncExternalStore<T>(
 			getSnapshot,
 			pending: value,
 			subscribe,
+			effectDeps: null,
 			forceUpdate:
 				typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__
 					? () => {
@@ -9863,6 +10027,7 @@ export function useSyncExternalStore<T>(
 			queued: false,
 		};
 		inst = created;
+		created.effectDeps = [created, subscribe];
 		ensureHooks(scope).set(subs.inst, inst);
 		// Always enqueue on mount: the first commit must run the tear check — for
 		// hydrate-then-sync, and for any store mutation in the render→commit window.
@@ -9879,13 +10044,18 @@ export function useSyncExternalStore<T>(
 		}
 	}
 
+	if (SCOPED_READ_TRACKING) (SCOPED_READS ??= new Map()).set(inst, value);
+
 	// Subscription lifecycle stays a real passive effect — it owns the unsubscribe
 	// cleanup (re-subscribe on store swap, unsubscribe on unmount) a bare queue
 	// entry can't carry. inst is identity-stable, so the deps `[inst, subscribe]`
 	// fire exactly when the old `[subscribe]` deps did. Body is the module-level
 	// deps-as-args fn (cast: EffectFn is nominally zero-arg, but the effect drain applies
-	// the deps positionally — see subscribeToStore).
-	useEffect(subscribeToStore as unknown as EffectFn, [inst, subscribe], subs.effect);
+	// the deps positionally — see subscribeToStore). Keep the pair immutable once
+	// passed to the effect slot; a failed swap may leave this pointer on inst, but
+	// the next render compares subscribe again before sharing it with useEffect.
+	if (inst.effectDeps![1] !== subscribe) inst.effectDeps = [inst, subscribe];
+	useEffect(subscribeToStore as unknown as EffectFn, inst.effectDeps!, subs.effect);
 
 	return value;
 }
@@ -9936,10 +10106,12 @@ export function useEffectEvent<F extends (...args: any[]) => any>(fn: F, slot?: 
 const CONTEXT_TAG = Symbol.for('octane.context');
 // Compiler-owned output caches compare their own lexical dependencies, but a
 // Provider update is propagated lazily through the already-mounted Block tree
-// rather than scheduling every consumer. One module-wide epoch lets generated
-// cache guards notice that exceptional channel without retaining any concrete
-// Context, boundary, or component identity in the runtime.
-let COMPILER_CACHE_CONTEXT_EPOCH = 0;
+// rather than scheduling every consumer. One process-wide epoch (read as
+// contextEpochNow() from context-epoch.ts, whose Symbol.for'd cell is shared
+// by every module copy so universal renderers and react-hosted mirrors share
+// the same counter) lets generated cache guards and
+// the $$ctxDepsEpoch bail fast path notice that exceptional channel without
+// retaining any concrete Context, boundary, or component identity in the runtime.
 
 export interface Context<T> {
 	(props: { value: T; children?: any }, scope: Scope, extra?: unknown): void;
@@ -9951,6 +10123,11 @@ export interface Context<T> {
 	 * changed value. Consumers record the version they read at; the memo bailout
 	 * (componentSlot) compares it so a context change forces a re-render through
 	 * the push-cascade even when props are shallow-equal. See useContextInternal.
+	 * Every bump must move the shared context epoch too — call bumpContextEpoch
+	 * adjacent to the write, or (for external bumpers like react-hosted mirrors)
+	 * guarantee a root.render commit follows, whose renderResolved entry bumps
+	 * it. The $$ctxDepsEpoch bail fast path treats an unmoved epoch as "nothing
+	 * changed", so an unpaired bump strands consumers.
 	 */
 	$$version: number;
 }
@@ -10030,24 +10207,71 @@ export function renderClientContextProvider<T>(
 	// outgoing one's record as its own and corrupt the tree. Remount the children on a
 	// flip instead: the two sides are structurally different code, which is the same
 	// contract React gives an element-type change.
-	if (props.children != null) {
-		// Steady state is one map read and an integer compare — the write happens only on the
-		// first render and on an actual flip.
-		const dialect = typeof props.children === 'function' ? 1 : 2;
+	const children = props.children;
+	if (children != null) {
+		// Compiled closures carry their stable source-body identity. Their function
+		// identity changes when a parent supplies fresh captures, but their output
+		// still owns the same slots and may retain its auto-memo dependencies.
+		const dialect =
+			typeof children === 'function' ? ((children as any)[CHILDREN_BODY] ?? children) : 2;
 		const previous = scope.hooks?.get(CHILDREN_DIALECT_SLOT);
 		if (previous !== dialect) {
-			if (previous !== undefined) {
+			if (previous !== undefined && (previous === 2 || dialect === 2)) {
 				resetScopeChildren(scope);
 				// The reset runs user cleanups, so it can throw into the enclosing boundary and
 				// switch it to its catch arm — which disposes this block. Rendering children
 				// into a disposed block writes into the catch range, so bail out here, as every
 				// other mid-render teardown site does after `unmountBlock`.
 				if (scope.block.disposed) return;
+			} else if (previous !== undefined) {
+				// A different body reused the same DOM/control slots. Its predecessor's
+				// output dependencies no longer prove what those slots contain. Hook
+				// values remain per-body and keep their mounted lifetime.
+				invalidateSharedBodyOutput(scope);
+				if (TRANSITION_JOURNAL !== null && !ROOT_RENDER_ROLLBACK) {
+					const hooks = scope.hooks!;
+					journalUndo(() => hooks.set(CHILDREN_DIALECT_SLOT, previous));
+				}
 			}
 			ensureHooks(scope).set(CHILDREN_DIALECT_SLOT, dialect);
 		}
-		childrenAsBody(props.children)(undefined, scope, undefined);
+		renderSharedBody(childrenAsBody(children), undefined, scope, undefined);
 	}
+}
+
+// Only the directly shared Scope needs stronger component ownership. Ordinary
+// descendants retain their lite paths, and nested shared bodies restore the
+// outer owner without allocating a stack or adding state to every Scope.
+let SHARED_BODY_SCOPE: Scope | null = null;
+
+function renderSharedBody(body: ComponentBody, props: any, scope: Scope, extra: any): any {
+	const previous = SHARED_BODY_SCOPE;
+	SHARED_BODY_SCOPE = scope;
+	try {
+		return body(props, scope, extra);
+	} finally {
+		SHARED_BODY_SCOPE = previous;
+	}
+}
+
+/** Body handoffs are cold; ordinary Provider updates keep their cache arrays. */
+function invalidateSharedBodyOutput(scope: Scope): void {
+	const first = scope.compilerMemo;
+	if (first === null) return;
+	invalidateSharedBodyMemoRegion(first);
+	if (first.overflow !== null) {
+		for (const region of first.overflow.values()) invalidateSharedBodyMemoRegion(region);
+	}
+}
+
+function invalidateSharedBodyMemoRegion(region: CompilerMemoRegion): void {
+	if (region.auto === undefined) return;
+	// A candidate may complete before a later sibling suspends. Rollback must
+	// restore the accepted body's dependencies along with its visible output.
+	if (TRANSITION_JOURNAL !== null && !ROOT_RENDER_ROLLBACK) {
+		TRANSITION_JOURNAL.push(JOURNAL_PROP, region, 'auto', region.auto);
+	}
+	region.auto = undefined;
 }
 
 /**
@@ -10074,7 +10298,7 @@ export function provideContext<T>(scope: Scope, context: Context<T>, value: T): 
 	// stays monotone so another root's committed Provider is never rewound.
 	if (had) {
 		context.$$version++;
-		COMPILER_CACHE_CONTEXT_EPOCH++;
+		bumpContextEpoch();
 	}
 	values.set(context, value);
 }
@@ -10087,6 +10311,7 @@ export function provideContext<T>(scope: Scope, context: Context<T>, value: T): 
 // this symbol so `isChildrenBlock()` can exclude it. `Symbol.for` so the identity survives multiple
 // runtime copies (e.g. a binding bundled against its own octane).
 const CHILDREN_BLOCK: unique symbol = Symbol.for('octane.childrenBlock') as any;
+const CHILDREN_BODY: unique symbol = Symbol.for('octane.childrenBody') as any;
 
 /**
  * Compiler-emitted: attach markerless single-host-root metadata while a fresh
@@ -10104,9 +10329,12 @@ export function markSingleRoot<T extends Function>(component: T): T {
  * Returns the function for inline use (`{ children: markChildrenBlock(__children$N) }`).
  * @internal
  */
-export function markChildrenBlock<T>(fn: T): T {
+export function markChildrenBlock<T>(fn: T, body?: object): T {
 	if (typeof fn === 'function') {
 		(fn as any)[CHILDREN_BLOCK] = true;
+		// Keep the boolean ABI for consumers using another runtime copy. Only
+		// auto-memoized client output supplies this module-owned identity token.
+		if (body !== undefined) (fn as any)[CHILDREN_BODY] = body;
 	}
 	return fn;
 }
@@ -10155,7 +10383,7 @@ function scopedChildrenAsBody(props: { children: unknown }): ComponentBody {
 }
 
 /**
- * Records which children dialect (1 = compiled body, 2 = descriptor) a scope last rendered, so a
+ * Records which children body (function/token = compiled, 2 = descriptor) a scope last rendered, so a
  * flip can be detected. Lives in the hook map, whose Symbol keys are disjoint from the numeric
  * `slots` indices the two dialects contend over.
  */
@@ -10256,6 +10484,7 @@ function resetHmrBlock(block: Block): void {
 			block._slots = null;
 			block.refFields = null;
 			block.slots = [];
+			block.compilerMemo = null;
 			block.deoptNode = null;
 		});
 
@@ -10313,6 +10542,7 @@ function resetScopeChildren(scope: Scope): void {
 		scope.effectSlots = null;
 		scope.hooks = null;
 		scope.slots = [];
+		scope.compilerMemo = null;
 		// The compiled ref manifest describes the OUTGOING body's binding bag. A compiled body
 		// re-stamps its own on mount, but the descriptor dialect never does — it would leave the
 		// old manifest pointed at a `childSlot` record, which `detachSubtreeRefs` would then read
@@ -11821,13 +12051,16 @@ export function useContext<T>(context: Context<T> | ForeignHostContext<T>): T {
 const DEFAULT_CTX: unique symbol = Symbol('octane.ctx.default');
 
 function rendererRegionOwnerForBlock(block: Block | null): RendererRegionOwnerBridge | null {
+	// bindRendererRegionOwner throws unless the block is a top-level root
+	// (kind 'root', no parent), so ancestors below the chain top can never be
+	// keys — climb straight there and pay one lookup per call instead of one
+	// per ancestor on every no-provider context read.
+	if (RENDERER_REGION_OWNER_COUNT === 0) return null;
 	let current = block;
-	while (current !== null) {
-		const bridge = RENDERER_REGION_DOM_OWNERS.get(current);
-		if (bridge !== undefined && bridge.active) return bridge;
-		current = current.parentBlock;
-	}
-	return null;
+	while (current !== null && current.parentBlock !== null) current = current.parentBlock;
+	if (current === null) return null;
+	const bridge = RENDERER_REGION_DOM_OWNERS.get(current);
+	return bridge !== undefined && bridge.active ? bridge : null;
 }
 
 function rendererRegionTryHandler(block: Block | null): ((error: unknown) => void) | null {
@@ -11889,12 +12122,14 @@ export function bindRendererRegionOwner(props: unknown): void {
 	root.$$ctxCache = null;
 	root.$$ctxCacheOwner = null;
 	if (previous === undefined) {
+		RENDERER_REGION_OWNER_COUNT++;
 		(root.cleanups ??= []).push(() => {
 			const current = RENDERER_REGION_DOM_BINDINGS.get(root);
 			if (current === undefined) return;
 			current.release();
 			RENDERER_REGION_DOM_BINDINGS.delete(root);
 			RENDERER_REGION_DOM_OWNERS.delete(root);
+			RENDERER_REGION_OWNER_COUNT--;
 		});
 	}
 }
@@ -11954,20 +12189,44 @@ function recordContextDependency(block: Block | null, context: Context<any>): vo
 // churns effect/memo deps and cannot converge when such an effect feeds that
 // provider.
 let SCOPED_READ_TRACKING = false;
-let SCOPED_READS: Map<Context<any>, number> | null = null;
+// Store snapshots share the existing deferred-read witness map. Records that
+// read neither context nor stores keep the original allocation-free cache path.
+type ScopedReads = Map<Context<any> | StoreInst<any>, unknown>;
+let SCOPED_READS: ScopedReads | null = null;
 
-function scopedReadsChanged(reads: Map<Context<any>, number> | null): boolean {
+function scopedReadsChanged(reads: ScopedReads | null): boolean {
 	if (reads === null) return false;
-	for (const [context, version] of reads) {
-		if (context.$$version !== version) return true;
+	for (const [source, value] of reads) {
+		if ('$$version' in source) {
+			if (source.$$version !== value) return true;
+		} else {
+			try {
+				if (!Object.is(value, source.getSnapshot())) return true;
+			} catch {
+				return true;
+			}
+		}
 	}
 	return false;
+}
+
+// Classification can resolve a descriptor before its host/item Block owns it.
+// A cache hit must transfer those reads to the current render, just like an
+// actual useContext call. Nested resolvers also contribute to their enclosing
+// resolver's capture, or caching the outer record would hide the nested reads.
+function replayScopedContextReads(reads: ScopedReads, block: Block | null): void {
+	for (const [source, value] of reads) {
+		if ('$$version' in source) {
+			if (block !== null) recordContextDependency(block, source);
+		}
+		if (SCOPED_READ_TRACKING) (SCOPED_READS ??= new Map()).set(source, value);
+	}
 }
 
 function createScopedResolver<T>(read: () => T): () => T {
 	let resolved = false;
 	let resolvedScope: Scope | null = null;
-	let resolvedReads: Map<Context<any>, number> | null = null;
+	let resolvedReads: ScopedReads | null = null;
 	let resolvedValue: T;
 
 	return (): T => {
@@ -11988,20 +12247,26 @@ function createScopedResolver<T>(read: () => T): () => T {
 			SCOPED_READ_TRACKING = true;
 			SCOPED_READS = null;
 			let next: T;
+			let nextReads: Map<Context<any>, number> | null;
 			try {
 				next = read();
 			} finally {
-				resolvedReads = SCOPED_READS;
+				nextReads = SCOPED_READS;
 				SCOPED_READ_TRACKING = previousTracking;
 				SCOPED_READS = previousReads;
+				// An enclosing resolver may catch this read's error and cache its
+				// fallback, so even an unsuccessful attempt contributes dependencies.
+				if (previousTracking && nextReads !== null) replayScopedContextReads(nextReads, null);
 			}
 			resolvedScope = scope;
+			resolvedReads = nextReads;
 			resolvedValue = next;
 			resolved = true;
-		} else if (resolvedScope !== scope) {
+		} else {
 			// Move ownership from the previewing parent to its direct child so a
 			// later sibling or provider scope still resolves independently.
 			resolvedScope = scope;
+			if (resolvedReads !== null) replayScopedContextReads(resolvedReads, CURRENT_BLOCK);
 		}
 		return resolvedValue;
 	};
@@ -12013,7 +12278,7 @@ function createScopedResolver<T>(read: () => T): () => T {
 function createNativeScopedResolver<T>(read: () => T): () => T {
 	let resolved = false;
 	let resolvedScope: Scope | null = null;
-	let resolvedReads: Map<Context<any>, number> | null = null;
+	let resolvedReads: ScopedReads | null = null;
 	let resolvedWitness: NativeReadWitness | null | undefined;
 	let resolvedValue: T;
 
@@ -12046,7 +12311,7 @@ function createNativeScopedResolver<T>(read: () => T): () => T {
 				const witnessToken = beginNativeReadWitness();
 				let readCompleted = false;
 				let next: T;
-				let nextReads: Map<Context<any>, number> | null;
+				let nextReads: ScopedReads | null;
 				let nextWitness: NativeReadWitness | null;
 				try {
 					next = read();
@@ -12055,6 +12320,7 @@ function createNativeScopedResolver<T>(read: () => T): () => T {
 					nextReads = SCOPED_READS;
 					SCOPED_READ_TRACKING = previousTracking;
 					SCOPED_READS = previousReads;
+					if (previousTracking && nextReads !== null) replayScopedContextReads(nextReads, null);
 					nextWitness = finishNativeReadWitness(witnessToken, readCompleted);
 				}
 				resolvedScope = scope;
@@ -12066,6 +12332,7 @@ function createNativeScopedResolver<T>(read: () => T): () => T {
 				resolved = true;
 			} else {
 				resolvedScope = scope;
+				if (resolvedReads !== null) replayScopedContextReads(resolvedReads, CURRENT_BLOCK);
 				if (collecting) replayNativeReadWitness(resolvedWitness);
 			}
 			completed = true;
@@ -12694,30 +12961,6 @@ function retainDiscardedWarmMemos(scope: Scope): void {
 	forEachSubtreeChild(scope, retainDiscardedWarmMemos);
 }
 
-function runWarm(fn: () => void, owner: Block = CURRENT_BLOCK!): void {
-	// Reuse the nearest OWNER ancestor's cache when one exists: a descendant that
-	// suspends mid-cascade re-warms its own subtree, and its entries must
-	// dedup against what the ancestor's walk already started (one cache per
-	// warming subtree, not per suspending block). Starting at owner is important:
-	// a stale source-child cache is not visible to adjacent siblings warmed by an
-	// enclosing plan.
-	const cache = warmCacheForOwner(owner);
-	WARM_EVER = true;
-	const prev = CURRENT_WARM;
-	const prevClaims = CURRENT_WARM_CLAIMS;
-	CURRENT_WARM = cache;
-	CURRENT_WARM_CLAIMS = new Set();
-	try {
-		fn();
-	} catch {
-		// Warming is speculative — it must never break the render that
-		// triggered it. A throwing warm plan just means fewer prefetches.
-	} finally {
-		CURRENT_WARM = prev;
-		CURRENT_WARM_CLAIMS = prevClaims;
-	}
-}
-
 function blockIsAncestor(ancestor: Block, block: Block): boolean {
 	for (let current: Block | null = block; current !== null; current = current.parentBlock) {
 		if (current === ancestor) return true;
@@ -12730,26 +12973,34 @@ function blockIsAncestor(ancestor: Block, block: Block): boolean {
  * adjacent descendants as well as the source branch. */
 function runActiveWarmPlans(local?: () => void): void {
 	const block = CURRENT_BLOCK!;
-	let plans: number[] | null = null;
+	// Render checkpoints restore the registration stack after nested renders.
+	// Freeze its current end so a plan cannot activate newly registered work here.
+	const end = ACTIVE_WARM_PLANS.length;
+	let first = 0;
 	let owner = block;
-	for (let i = 0; i < ACTIVE_WARM_PLANS.length; i += 3) {
-		const planBlock = ACTIVE_WARM_PLANS[i] as Block;
-		if (!blockIsAncestor(planBlock, block)) continue;
-		(plans ??= []).push(i);
-		if (plans.length === 1) owner = planBlock;
+	for (; first < end; first += 3) {
+		const planBlock = ACTIVE_WARM_PLANS[first] as Block;
+		if (blockIsAncestor(planBlock, block)) {
+			owner = planBlock;
+			break;
+		}
 	}
-	if (plans === null && local === undefined) return;
-	runWarm(() => {
-		if (plans !== null) {
-			for (let i = 0; i < plans.length; i++) {
-				CURRENT_WARM_CLAIMS = new Set();
-				try {
-					const index = plans[i];
-					(ACTIVE_WARM_PLANS[index + 1] as (props: any) => void)(ACTIVE_WARM_PLANS[index + 2]);
-				} catch {
-					// Each speculative plan is independent. One throwing getter or
-					// creation must not prevent adjacent plans from warming.
-				}
+	if (first === end && local === undefined) return;
+	// Cache above adjacent siblings, reusing an enclosing owner's current cache.
+	const cache = warmCacheForOwner(owner);
+	WARM_EVER = true;
+	const previous = CURRENT_WARM;
+	const previousClaims = CURRENT_WARM_CLAIMS;
+	CURRENT_WARM = cache;
+	try {
+		for (let i = first; i < end; i += 3) {
+			if (i !== first && !blockIsAncestor(ACTIVE_WARM_PLANS[i] as Block, block)) continue;
+			CURRENT_WARM_CLAIMS = new Set();
+			try {
+				(ACTIVE_WARM_PLANS[i + 1] as (props: any) => void)(ACTIVE_WARM_PLANS[i + 2]);
+			} catch {
+				// Each speculative plan is independent. One throwing getter or
+				// creation must not prevent adjacent plans from warming.
 			}
 		}
 		if (local !== undefined) {
@@ -12760,7 +13011,12 @@ function runActiveWarmPlans(local?: () => void): void {
 				// Speculative and independent from the registered ancestor plans.
 			}
 		}
-	}, owner);
+	} catch {
+		// Warming is speculative; failed bookkeeping must not break its render.
+	} finally {
+		CURRENT_WARM = previous;
+		CURRENT_WARM_CLAIMS = previousClaims;
+	}
 }
 
 function activeMemoMatch(
@@ -13138,6 +13394,7 @@ function adoptNativeMemoEntry(scope: Scope, slot: HookSlot, deps: any[]): MemoHo
 		deps,
 		value: adopted.value,
 		warmEpisode: CURRENT_WARM_EPISODE,
+		warmRecord: undefined,
 		nativeWitness: adopted.nativeWitness,
 	};
 	if (ACTIVE_TRANSITION_ATTEMPT !== null) journalMemoEntry(scope, slot, entry);
@@ -13403,6 +13660,17 @@ export function memoPublishAlways<T>(slot: HookSlot, value: T): T {
 // ---------------------------------------------------------------------------
 
 const LAZY_COMPONENT = Symbol.for('octane.lazy');
+const LAZY_BODY_CHECK = Symbol.for('octane.lazyBodyCheck');
+type LazyBodyCheck = (scope: Scope) => boolean;
+
+function markLazyBodyCheck(body: ComponentBody<any>, check: LazyBodyCheck): void {
+	// Static-hoisting HOCs must not inherit the wrapped lazy's ownership check.
+	Object.defineProperty(body, LAZY_BODY_CHECK, {
+		get() {
+			return this === body ? check : undefined;
+		},
+	});
+}
 
 /**
  * Resolve a lazy module payload to its component. Accepts React's canonical
@@ -13459,6 +13727,9 @@ export function lazy<C extends ComponentBody<any>>(
 	let displayName: string | undefined;
 	let resolvedName = 'Lazy';
 	let lazyWrapper!: ComponentBody<any>;
+	// A wrapper may own many mounted scopes. Remember each scope's accepted
+	// module body separately so another mount cannot hide a body handoff.
+	const bodySlot = Symbol();
 
 	const initializeLazy = (): void => {
 		if (status !== 'uninitialized') return;
@@ -13504,6 +13775,18 @@ export function lazy<C extends ComponentBody<any>>(
 		// throwing/accessor default export is a render-time failure in React: a later
 		// render reads it again without re-running the loader.
 		const comp = resolveLazyModule(result);
+		const previousBody = scope.hooks?.get(bodySlot) as ComponentBody<any> | undefined;
+		if (previousBody !== comp) {
+			if (previousBody !== undefined) invalidateSharedBodyOutput(scope);
+			const hooks = ensureHooks(scope);
+			if (TRANSITION_JOURNAL !== null && !ROOT_RENDER_ROLLBACK) {
+				journalUndo(() => {
+					if (previousBody === undefined) hooks.delete(bodySlot);
+					else hooks.set(bodySlot, previousBody);
+				});
+			}
+			hooks.set(bodySlot, comp);
+		}
 		resolvedName = (comp as any).displayName || comp.name || 'Lazy';
 		if ((comp as any).__memo === true) {
 			// The lazy wrapper owns the live Block, so a resolved memo wrapper would
@@ -13518,13 +13801,25 @@ export function lazy<C extends ComponentBody<any>>(
 					},
 				});
 				Object.defineProperty(lazyWrapper, '__compare', {
-					value: (prev: any, next: any): boolean => {
+					value: (prev: any, next: any, renderScope: Scope): boolean => {
 						const current = resolveLazyModule(result);
+						// Equal props cannot reuse a different module body's output. This
+						// check belongs to the mounted scope, not the shared lazy payload.
+						if (renderScope.hooks?.get(bodySlot) !== current || (current as any).__memo !== true)
+							return false;
 						const compare = (current as any).__compare as
 							((previous: any, incoming: any) => boolean) | undefined;
 						const previous = lazyResolvedProps(current, prev);
 						const incoming = lazyResolvedProps(current, next);
-						return compare ? compare(previous, incoming) : shallowEqualProps(previous, incoming);
+						return compare
+							? (current as any)[LAZY_BODY_CHECK] !== undefined
+								? (compare as (prev: any, next: any, scope: Scope) => boolean)(
+										previous,
+										incoming,
+										renderScope,
+									)
+								: compare(previous, incoming)
+							: shallowEqualProps(previous, incoming);
 					},
 				});
 				memoMetadataInstalled = true;
@@ -13542,7 +13837,7 @@ export function lazy<C extends ComponentBody<any>>(
 			__profileComponentSource(lazyWrapper, comp);
 			profiledComponent = comp;
 		}
-		return comp(lazyResolvedProps(comp, props), scope, extra);
+		return renderSharedBody(comp, lazyResolvedProps(comp, props), scope, extra);
 	};
 
 	lazyWrapper = (props: any, scope: Scope, extra: any): unknown => {
@@ -13575,6 +13870,15 @@ export function lazy<C extends ComponentBody<any>>(
 	// Existing ancestor warm plans can start an independently reachable module,
 	// but resolution, component execution, and deferred hydration remain lazy.
 	markWarm(lazyWrapper, initializeLazy);
+	markLazyBodyCheck(lazyWrapper, (scope) => {
+		// Checking a bailout never starts the loader or accepts speculative output.
+		if (status !== 'fulfilled') return false;
+		const current = resolveLazyModule(result);
+		if (scope.hooks?.get(bodySlot) !== current) return false;
+		// Direct lazy -> lazy is invalid, but lazy -> memo -> lazy is supported.
+		const nestedCheck = (current as any)[LAZY_BODY_CHECK] as LazyBodyCheck | undefined;
+		return nestedCheck === undefined || nestedCheck(scope);
+	});
 	Object.defineProperty(lazyWrapper, LAZY_COMPONENT, {
 		get() {
 			return this === lazyWrapper;
@@ -13716,7 +14020,7 @@ interface LazyTemplateRecord {
 	html: string;
 	ns: 0 | 1 | 2 | 3;
 	frag: number;
-	parsed: Array<Element | undefined>;
+	parsed: Array<Node | null>;
 	/**
 	 * Lazily computed adoption-root descriptor for PROD hydration's parse-free
 	 * root check (see HydrationCapability.cloneLazy): 0 = not computed yet, a
@@ -13729,7 +14033,26 @@ interface LazyTemplateRecord {
 
 const LAZY_TEMPLATE = Symbol('octane.lazy-template');
 
-function parseTemplate(html: string, ns: 0 | 1 | 2, frag: number): Element {
+// The parser needs a wrapper to establish foreign-content namespaces and to
+// retain HTML fragment roots. Transfer ordinary children once while caching
+// the template; every later clone can insert the native fragment in one call.
+// Custom elements keep the wrapper: their connectedCallback can synchronously
+// inspect which earlier siblings have already joined the live parent.
+function fragmentTemplate(wrapper: Element): Node {
+	for (const descendant of wrapper.querySelectorAll('*')) {
+		if (descendant.localName.includes('-') || descendant.hasAttribute('is')) {
+			(wrapper as any).__oct_frag = true;
+			return wrapper;
+		}
+	}
+	const fragment = document.createDocumentFragment();
+	let child: Node | null;
+	while ((child = wrapper.firstChild) !== null) fragment.appendChild(child);
+	(fragment as any).__oct_frag = true;
+	return fragment;
+}
+
+function parseTemplate(html: string, ns: 0 | 1 | 2, frag: number): Node {
 	initDomOperations();
 	const t = document.createElement('template');
 	if (ns === 0) {
@@ -13743,7 +14066,7 @@ function parseTemplate(html: string, ns: 0 | 1 | 2, frag: number): Element {
 		// for clone() to SKIP the structural hydration check — there is no 1:1 server
 		// node to compare the wrapper against.
 		if (root.nodeType === 1 && root.localName === 'octane-frag') {
-			(root as any).__oct_frag = true;
+			return fragmentTemplate(root);
 		}
 		return root;
 	}
@@ -13757,8 +14080,7 @@ function parseTemplate(html: string, ns: 0 | 1 | 2, frag: number): Element {
 	t.innerHTML = `<${wrap}>${html}</${wrap}>`;
 	const wrapEl = t.content.firstChild as Element;
 	if (frag) {
-		(wrapEl as any).__oct_frag = true;
-		return wrapEl;
+		return fragmentTemplate(wrapEl);
 	}
 	return wrapEl.firstChild as Element;
 }
@@ -13770,7 +14092,7 @@ export function template(html: string, ns: number = 0, frag: number = 0): Elemen
 			html,
 			ns: ns === 1 ? 1 : ns === 2 ? 2 : ns === 3 ? 3 : 0,
 			frag,
-			parsed: [],
+			parsed: [null, null, null],
 			root: 0,
 		} satisfies LazyTemplateRecord,
 	} as unknown as Element;
@@ -13835,7 +14157,7 @@ function lazyRootMatches(server: Node, lazy: LazyTemplateRecord): boolean {
  * Resolve a lazy compiler template token to its parsed (and per-namespace
  * cached) root for the namespace in effect at the current render site.
  */
-function resolveLazyTemplate(lazy: LazyTemplateRecord): Element {
+function resolveLazyTemplate(lazy: LazyTemplateRecord): Node {
 	let ns: 0 | 1 | 2;
 	if (lazy.ns === 3) {
 		const inherited =
@@ -13845,7 +14167,7 @@ function resolveLazyTemplate(lazy: LazyTemplateRecord): Element {
 		ns = lazy.ns;
 	}
 	let parsed = lazy.parsed[ns];
-	if (parsed === undefined) {
+	if (parsed === null) {
 		parsed = parseTemplate(lazy.html, ns, lazy.frag);
 		lazy.parsed[ns] = parsed;
 	}
@@ -14753,6 +15075,10 @@ export function clone<T extends Node>(node: T, loc?: string, partialStyles?: str
  */
 export function drainFrag(root: Node, parent: Node, anchor: Node | null): void {
 	if (activeHydration() !== null && (root as any).__oct_vfrag === true) return;
+	if (root.nodeType === 11) {
+		parent.insertBefore(root, anchor);
+		return;
+	}
 	let c: Node | null;
 	while ((c = getFirstChild(root)) !== null) parent.insertBefore(c, anchor);
 }
@@ -14837,19 +15163,27 @@ function isAttributeParserNormalizedMatch(server: string | null, client: string)
 }
 
 /**
- * Compiler-emitted for a single-text-child binding's mount. Normally creates the
- * text node and appends it; while hydrating, ADOPTS the element's existing
- * (server-rendered) text node so the DOM isn't rebuilt. The prev-value the
+ * Compiler-emitted for a single-text-child binding's mount. Reuses the cloned
+ * template's text placeholder only when the compiler explicitly seeded one,
+ * otherwise preserves baseline create/append semantics; while hydrating, ADOPTS the existing server
+ * text node so the DOM isn't rebuilt. The prev-value the
  * compiler seeds alongside this makes the first update a no-op when the client
  * value matches the server text (avoiding a mismatch re-render).
  */
-export function htext(el: Node, value: unknown): Text {
+export function htext(el: Node, value: unknown, seeded: 1 | undefined = undefined): Text {
 	// Coerce here (mirrors setText) rather than at every call site — keeps the
 	// per-text-hole mount codegen to a bare `htext(el, _v)`. Mount-once, so folding
 	// the coercion in costs nothing on the hot update path.
 	const text = coerceText(value);
 	const hydration = activeHydration();
 	if (hydration !== null) return hydration.htext(el, text);
+	if (seeded === 1) {
+		const first = getFirstChild(el);
+		if (first !== null && first.nodeType === 3) {
+			(first as Text).nodeValue = text;
+			return first as Text;
+		}
+	}
 	const t = document.createTextNode(text);
 	el.appendChild(t);
 	return t;
@@ -14876,8 +15210,7 @@ export function htextSwap(posNode: Node | null, value: unknown): Text {
 	// Fresh mount: posNode is the `<!>` placeholder — replace it in place.
 	const t = document.createTextNode(text);
 	const parent = posNode!.parentNode!;
-	parent.insertBefore(t, posNode);
-	parent.removeChild(posNode!);
+	parent.replaceChild(t, posNode!);
 	return t;
 }
 
@@ -15044,10 +15377,12 @@ let hiddenStyleWriter:
 
 function updateTextValue(node: Text, value: string): void {
 	if (hiddenTextWriter !== null && hiddenTextWriter(node, value)) return;
-	if (node.nodeValue !== value) {
+	const previous = node.nodeValue;
+	if (previous !== value) {
 		// Descriptor text updates participate in the same held-transition undo
-		// window as compiled text bindings.
-		if (TRANSITION_JOURNAL !== null) journalText(node);
+		// window as compiled text bindings. Reuse the live value just compared;
+		// an authored-value cache cannot restore a later external DOM edit.
+		if (TRANSITION_JOURNAL !== null) journalText(node, previous);
 		node.nodeValue = value;
 	}
 }
@@ -15063,7 +15398,7 @@ export function setText(node: Text, value: any): void {
 	// View-transition dirty tracking and journaling remain at this write boundary.
 	// The optional driver marks the innermost boundary only during a wrapped drain.
 	VIEW_TRANSITION_DRIVER?.markDirty();
-	if (TRANSITION_JOURNAL !== null) journalText(node);
+	if (TRANSITION_JOURNAL !== null) journalText(node, node.nodeValue);
 	//
 	// Write via `nodeValue` (a `Node`-level accessor) rather than `data` (which
 	// lives on `CharacterData` one prototype hop deeper) — it's measurably faster
@@ -15089,6 +15424,28 @@ export function setAttributeIfChanged(
 ): unknown {
 	if (previous === value) return previous;
 	setAttribute(el, name, value);
+	return value;
+}
+
+export function setPlainAttributeIfChanged(
+	value: unknown,
+	previous: unknown,
+	el: Element,
+	name: string,
+): unknown {
+	if (previous === value) return previous;
+	setPlainAttribute(el, name, value);
+	return value;
+}
+
+export function setURLAttributeIfChanged(
+	value: unknown,
+	previous: unknown,
+	el: Element,
+	name: string,
+): unknown {
+	if (previous === value) return previous;
+	setURLAttribute(el, name, value);
 	return value;
 }
 
@@ -16227,7 +16584,13 @@ function deoptChildNamespace(parent: Node): string | undefined {
 	if (parent.nodeType !== 1) return undefined;
 	const el = parent as Element;
 	if (el.namespaceURI === SVG_NS) return el.localName === 'foreignObject' ? undefined : SVG_NS;
-	if (el.namespaceURI === MATHML_NS) return MATHML_NS;
+	if (el.namespaceURI === MATHML_NS) {
+		if (el.localName === 'annotation-xml') {
+			const encoding = el.getAttribute('encoding')?.toLowerCase();
+			if (encoding === 'text/html' || encoding === 'application/xhtml+xml') return undefined;
+		}
+		return MATHML_NS;
+	}
 	return undefined;
 }
 
@@ -16538,8 +16901,51 @@ function devValidateHostProps(el: Element, props: Record<string, unknown>): void
 }
 
 /**
- * Compiler-only fast path for a statically named `data-*` attribute whose
- * expression is proven to be a string at authoring time. Runtime values still
+ * Compiler-admitted native scalar attribute: the name is valid, already aliased,
+ * unnamespaced and has no property/boolean/numeric/URL semantics. Keep the
+ * generic development route even for production-compiled code loaded in dev.
+ */
+export function setPlainAttribute(el: Element, name: string, value: unknown): void {
+	if (process.env.NODE_ENV !== 'production') return setAttribute(el, name, value);
+	const type = typeof value;
+	const next =
+		value == null || type === 'boolean' || type === 'function' || type === 'symbol'
+			? null
+			: String(value);
+	const hydration = activeHydration();
+	if (hydration !== null && !hydration.allowAttribute(el, name, next)) return;
+	if (TRANSITION_JOURNAL !== null) journalAttr(el, name);
+	if (next === null) el.removeAttribute(name);
+	else el.setAttribute(name, next);
+}
+
+/** Same scalar contract for a statically proven, unnamespaced native URL sink. */
+export function setURLAttribute(el: Element, name: string, value: unknown): void {
+	if (process.env.NODE_ENV !== 'production') return setAttribute(el, name, value);
+	const type = typeof value;
+	let next =
+		value == null || type === 'boolean' || type === 'function' || type === 'symbol'
+			? null
+			: String(value);
+	if (next !== null) {
+		if (
+			next === '' &&
+			(name === 'src' ||
+				(name === 'href' && el.nodeName !== 'A' && el.nodeName !== 'AREA') ||
+				(name === 'data' && el.nodeName === 'OBJECT'))
+		)
+			next = null;
+		else next = sanitizeURL(next);
+	}
+	const hydration = activeHydration();
+	if (hydration !== null && !hydration.allowAttribute(el, name, next)) return;
+	if (TRANSITION_JOURNAL !== null) journalAttr(el, name);
+	if (next === null) el.removeAttribute(name);
+	else el.setAttribute(name, next);
+}
+
+/**
+ * Compiler-only fast path for a statically named `data-*` attribute. Runtime values still
  * follow the generic data-attribute contract: nullish/function/symbol remove,
  * while booleans, numbers and objects stringify. This matters when an `as
  * string` assertion or an external typed value is inaccurate at runtime. The
@@ -17070,15 +17476,24 @@ function jsxEventName(rest: string): string {
 	return rest.toLowerCase();
 }
 
-function eventSlot(
-	name: string,
-	el?: Element,
-): { type: string; key: string; capture: boolean } | null {
+interface ParsedEventSlot {
+	readonly type: string;
+	readonly key: string;
+	readonly capture: boolean;
+}
+
+// Only the finite delegated JSX catalog is retained. Unknown native event names
+// keep the uncached fallback, and custom-element acceptance stays element-local.
+let PARSED_EVENT_SLOTS: Map<string, ParsedEventSlot> | undefined;
+
+function eventSlot(name: string, el?: Element): ParsedEventSlot | null {
 	if (
 		!isEventKey(name) ||
 		(el !== undefined && isHtmlCustomElement(el) && !isDelegatedEventProp(name))
 	)
 		return null;
+	const cached = PARSED_EVENT_SLOTS?.get(name);
+	if (cached !== undefined) return cached;
 	let rest = name.slice(2);
 	let capture = false;
 	if (
@@ -17091,7 +17506,9 @@ function eventSlot(
 		rest = rest.slice(0, rest.length - 7);
 	}
 	const type = jsxEventName(rest);
-	return { type, key: capture ? CAPTURE_PREFIX + type : '$$' + type, capture };
+	const slot = { type, key: capture ? CAPTURE_PREFIX + type : '$$' + type, capture };
+	if (isDelegatedEventProp(name)) (PARSED_EVENT_SLOTS ??= new Map()).set(name, slot);
+	return slot;
 }
 
 // Remove ONE host prop that was present last render and is gone this render. This is
@@ -17198,18 +17615,11 @@ function isHostPropIdentityKey(name: string): boolean {
 	return isEventKey(name);
 }
 
-function normalizedHostProp(
-	el: Element,
-	rawName: string,
-): readonly [identity: string, name: string] {
-	if (rawName === 'class' || rawName === 'className') return ['class', 'class'];
+function normalizedHostProp(el: Element, rawName: string): string {
+	if (rawName === 'class' || rawName === 'className') return 'class';
 	const actionName = formActionAttributeName(el, rawName);
-	if (actionName !== null) return [actionName, actionName];
-	if (isHostPropIdentityKey(rawName)) return [rawName, rawName];
-	let name = rawName;
-	if (!isHtmlCustomElement(el)) name = ATTRIBUTE_ALIASES.get(name) ?? name;
-	const identity = el.namespaceURI === 'http://www.w3.org/1999/xhtml' ? name.toLowerCase() : name;
-	return [identity, name];
+	if (actionName !== null) return actionName;
+	return isHtmlCustomElement(el) ? rawName : (ATTRIBUTE_ALIASES.get(rawName) ?? rawName);
 }
 
 /**
@@ -17234,7 +17644,7 @@ export function setHostPropSources(
 	hasNestedChildren = false,
 ): Record<string, unknown> {
 	interface PropWriter {
-		rawName: string;
+		name: string;
 		value: unknown;
 		firstOrder: number;
 		lastOrder: number;
@@ -17246,12 +17656,12 @@ export function setHostPropSources(
 		if (typeof rawName !== 'string') return;
 		const order = sourceOrder++;
 		const previous = props.get(rawName);
-		props.set(rawName, {
-			rawName,
-			value,
-			firstOrder: previous?.firstOrder ?? order,
-			lastOrder: order,
-		});
+		if (previous !== undefined) {
+			previous.value = value;
+			previous.lastOrder = order;
+		} else {
+			props.set(rawName, { name: rawName, value, firstOrder: order, lastOrder: order });
+		}
 	}
 
 	for (const source of sources) {
@@ -17275,56 +17685,67 @@ export function setHostPropSources(
 		}
 	}
 
-	const values = new Map<
-		string,
-		readonly [name: string, value: unknown, firstOrder: number, lastOrder: number]
-	>();
+	// Source reads are complete. Reuse each raw writer as its normalized winner;
+	// neither Map escapes this call, and no second per-key tuple is needed.
+	const values = new Map<string, PropWriter>();
+	const html = el.namespaceURI === 'http://www.w3.org/1999/xhtml';
 	let needsWinningOrderSort = false;
 	for (const writer of props.values()) {
-		if (writer.rawName === 'key') continue;
-		const [identity, name] = normalizedHostProp(el, writer.rawName);
+		const rawName = writer.name;
+		if (rawName === 'key') continue;
+		const identityKey = isHostPropIdentityKey(rawName);
+		const name = identityKey ? rawName : normalizedHostProp(el, rawName);
+		const identity = html && !identityKey ? name.toLowerCase() : name;
 		const previous = values.get(identity);
 		if (previous !== undefined) {
-			if (previous[3] >= writer.lastOrder) continue;
-			// Map order already matches firstOrder unless a later raw alias replaces
-			// an earlier normalized identity without moving its Map entry.
+			if (previous.lastOrder >= writer.lastOrder) continue;
+			// A winning alias can have a later first insertion than this Map entry.
 			needsWinningOrderSort = true;
 		}
-		values.set(identity, [
-			process.env.NODE_ENV !== 'production' &&
-			(writer.rawName === 'tabIndex' || writer.rawName === 'htmlFor')
-				? writer.rawName
-				: name,
-			writer.value,
-			writer.firstOrder,
-			writer.lastOrder,
-		]);
+		writer.name =
+			process.env.NODE_ENV !== 'production' && (rawName === 'tabIndex' || rawName === 'htmlFor')
+				? rawName
+				: name;
+		values.set(identity, writer);
 	}
 	if (classMerges !== null) {
 		for (const extra of classMerges) {
-			const [identity, name] = normalizedHostProp(el, extra.rawName);
-			const previous = values.get(identity);
+			const previous = values.get('class');
 			if (previous !== undefined) {
-				values.set(identity, [
-					previous[0],
-					mergeClass(previous[1], extra.value),
-					previous[2],
-					extra.order,
-				]);
-				continue;
+				previous.value = mergeClass(previous.value, extra.value);
+				previous.lastOrder = extra.order;
+			} else {
+				values.set('class', {
+					name: 'class',
+					value: extra.value,
+					firstOrder: extra.order,
+					lastOrder: extra.order,
+				});
 			}
-			values.set(identity, [name, extra.value, extra.order, extra.order]);
 		}
 	}
 	const resolved: Record<string, unknown> = Object.create(null);
-	const ordered = [...values.values()];
-	if (needsWinningOrderSort) ordered.sort((a, b) => a[2] - b[2]);
-	for (const [name, value] of ordered) resolved[name] = value;
-	const formHost =
-		el.localName === 'input' || el.localName === 'textarea' || el.localName === 'select';
+	const ordered = needsWinningOrderSort
+		? [...values.values()].sort((a, b) => a.firstOrder - b.firstOrder)
+		: values.values();
+	for (const { name, value } of ordered) resolved[name] = value;
+	const tag = el.localName;
+	const formHost = tag === 'input' || tag === 'textarea' || tag === 'select';
 	setSpread(el, resolved, prev, scope, true, formHost);
 	setDangerouslySetInnerHTMLSources(el, sources, hasNestedChildren);
-	if (formHost) setFormControlSources(el, sources);
+	// Form writers use the exact JSX spelling, independently of DOM aliases:
+	// e.g. a later VALUE attribute must not replace the controlled value prop.
+	// The raw writer Map already resolved source precedence and getter reads.
+	if (formHost)
+		applyFormControlValues(
+			el,
+			tag,
+			props.get('value')?.value,
+			props.get('defaultValue')?.value,
+			props.get('checked')?.value,
+			props.get('defaultChecked')?.value,
+			props.get('multiple')?.value,
+		);
 	return resolved;
 }
 
@@ -17486,9 +17907,12 @@ export function setSpread(
 			);
 			continue;
 		}
+		// Styles/raw HTML above still need their setters for stable object values.
+		// Controlled fields reassert live DOM drift; other unchanged props need no
+		// event-name parsing or custom-element routing.
+		if (v === pv && !isControlledHostProp(el, k)) continue;
 		const ev = eventSlot(k, el);
 		if (ev) {
-			if (v === pv) continue;
 			// Lazy-delegate any event we haven't seen — the compiler can't predict
 			// event names that arrive dynamically through spread. Capture-phase
 			// handlers (`onXxxCapture`) register their own capture-phase listener.
@@ -17504,10 +17928,6 @@ export function setSpread(
 			);
 			continue;
 		}
-		// Controlled `value`/`checked` bypass the identity skip — they must
-		// reassert every commit (the DOM may have drifted; the helper's own
-		// DOM-diff makes the call cheap).
-		if (v === pv && !isControlledHostProp(el, k)) continue;
 		// React only honors autoFocus from the final props of the element's mount.
 		// An absent initial spread must not turn a later update into a mount.
 		if (prev !== undefined && k === 'autoFocus' && !isHtmlCustomElement(el)) continue;
@@ -17642,6 +18062,33 @@ function rootIdentifierPrefix(block: Block): string {
 	return block.idState.prefix;
 }
 
+// Head attributes are reapplied even when an object-valued prop has the same
+// identity: its coercion may have changed, or outside code may have edited the
+// live head. Compare the final scalar value, retaining neither user objects nor
+// a stale authored-value cache. Common metadata names need no property, alias,
+// namespace, or URL routing, and equal values avoid native attribute mutation.
+function setHeadAttribute(el: Element, name: string, value: unknown): void {
+	switch (name) {
+		case 'name':
+		case 'content':
+		case 'lang':
+		case 'media':
+		case 'id':
+		case 'title':
+		case 'type':
+			break;
+		default:
+			return setAttribute(el, name, value);
+	}
+	const next = coerceAttrValue(el, name, value);
+	const hydration = activeHydration();
+	if (hydration !== null && !hydration.allowAttribute(el, name, next)) return;
+	if (el.getAttribute(name) === next) return;
+	if (TRANSITION_JOURNAL !== null) journalAttr(el, name);
+	if (next === null) el.removeAttribute(name);
+	else el.setAttribute(name, next);
+}
+
 export function headBlock(
 	scope: Scope,
 	slot: number,
@@ -17722,7 +18169,7 @@ export function headBlock(
 				continue;
 			}
 			names.push(k);
-			setAttribute(el, k, attrs[k]);
+			setHeadAttribute(el, k, attrs[k]);
 		}
 		state.attrNames = names;
 	} else {
@@ -17859,7 +18306,8 @@ interface HandlerBundle {
 	[EVENT_SLOT_KIND]: typeof HANDLER_BUNDLE_KIND;
 	fn: (...args: any[]) => any;
 	// An array for arity 0/N; fixed arities carry their arguments in the bundle.
-	args: any[] | 1 | 2;
+	// Negative tags prepend the native event to lifted block-arrow captures.
+	args: any[] | 1 | 2 | -1 | -2;
 	a0?: any;
 	a1?: any;
 }
@@ -17983,6 +18431,19 @@ export function evt2u(d: HandlerBundle, fn: any, a0: any, a1: any): void {
 	d.a0 = a0;
 	d.a1 = a1;
 }
+// Lifted block arrows receive the native event before their lexical captures.
+// Negative arities preserve the ordinary bundle's exact authored argument list
+// and reuse its field layout, update helpers, journal, and dispatch snapshot.
+export function evt1e(el: Element, key: string, fn: any, a0: any): HandlerBundle {
+	const d: HandlerBundle = { fn, args: -1, a0, [EVENT_SLOT_KIND]: HANDLER_BUNDLE_KIND };
+	setEventHandler(el, key, d);
+	return d;
+}
+export function evt2e(el: Element, key: string, fn: any, a0: any, a1: any): HandlerBundle {
+	const d: HandlerBundle = { fn, args: -2, a0, a1, [EVENT_SLOT_KIND]: HANDLER_BUNDLE_KIND };
+	setEventHandler(el, key, d);
+	return d;
+}
 export function evtN(el: Element, key: string, fn: any, args: any[]): HandlerBundle {
 	const d: HandlerBundle = { fn, args, [EVENT_SLOT_KIND]: HANDLER_BUNDLE_KIND };
 	setEventHandler(el, key, d);
@@ -18000,7 +18461,22 @@ export function evtNu(d: HandlerBundle, fn: any, args: any[]): void {
 // each root container when `createRoot` runs, and to each portal target when
 // the portal mounts. This matches ReactDOM 17+ behaviour: events scoped to
 // the React-owned subtrees, no document-level pollution.
-const _delegated = new Set<string>();
+interface DelegatedEventType {
+	name: string;
+	bubbleKey: string;
+	captureKey: string;
+	flags: number;
+}
+const EVENT_BUBBLE = 1;
+const EVENT_CAPTURE = 2;
+const EVENT_NATIVE_CAPTURE = 4;
+const EVENT_TARGET_ONLY = 8;
+const EVENT_DISCRETE = 16;
+const EVENT_RESTORE = 32;
+const EVENT_DISABLED_MOUSE = 64;
+const EVENT_DISABLED_ENTER = 128;
+const EVENT_CUSTOM_NATIVE_ONLY = 256;
+const _delegated = new Map<string, DelegatedEventType>();
 
 // Active delegation targets (createRoot containers + portal targets). A
 // portal target may host multiple portals; the refcount tracks how many
@@ -18095,7 +18571,7 @@ function prepareDelegatedEvent(event: Event, listener: Node): EventTarget[] | un
 // bubbling types always have a capture observer to snapshot root membership;
 // only these names also run a logical capture queue. Non-bubbling families share
 // one native capture callback for their capture and emulated bubble queues.
-const _delegatedCapture = new Set<string>();
+const _delegatedCapture = new Map<string, DelegatedEventType>();
 
 // Non-bubbling events must be delegated in the CAPTURE phase so the single root
 // listener still sees them (the capture phase reaches the root even when the event
@@ -18196,7 +18672,9 @@ export function delegateEvents(eventNames: string[]): void {
 	for (let i = 0; i < eventNames.length; i++) {
 		const name = eventNames[i];
 		if (_delegated.has(name)) continue;
-		_delegated.add(name);
+		const type = _delegatedCapture.get(name) ?? createDelegatedEventType(name);
+		type.flags |= EVENT_BUBBLE;
+		_delegated.set(name, type);
 		// Pre-seed the handler-slot key: the dispatch walk polls `$$<type>` on
 		// EVERY logical ancestor of every delegated event, and most of them carry
 		// no handler (see initDomOperations, trick 2).
@@ -18232,7 +18710,9 @@ export function delegateCaptureEvents(eventNames: string[]): void {
 	for (let i = 0; i < eventNames.length; i++) {
 		const name = eventNames[i];
 		if (_delegatedCapture.has(name)) continue;
-		_delegatedCapture.add(name);
+		const type = _delegated.get(name) ?? createDelegatedEventType(name);
+		type.flags |= EVENT_CAPTURE;
+		_delegatedCapture.set(name, type);
 		// Same seeding rationale as delegateEvents (the capture walk polls
 		// `$$capture:<type>` along the built path).
 		if (canSeed) seedExpando(Element.prototype, CAPTURE_PREFIX + name);
@@ -18266,7 +18746,7 @@ function registerDelegationTarget(target: Node, root = false): void {
 		if ((target as any).onclick == null && (target as any).nodeType === 1) {
 			(target as any).onclick = noop;
 		}
-		for (const name of _delegated) {
+		for (const name of _delegated.keys()) {
 			target.addEventListener(
 				name,
 				dispatchDelegated,
@@ -18280,7 +18760,7 @@ function registerDelegationTarget(target: Node, root = false): void {
 				);
 			}
 		}
-		for (const name of _delegatedCapture) {
+		for (const name of _delegatedCapture.keys()) {
 			if (_delegated.has(name)) continue;
 			target.addEventListener(
 				name,
@@ -18300,11 +18780,11 @@ function unregisterDelegationTarget(target: Node, root = false): void {
 	if (!prev) return;
 	if (prev === 1) {
 		_delegationTargets.delete(target);
-		for (const name of _delegated) {
+		for (const name of _delegated.keys()) {
 			target.removeEventListener(name, dispatchDelegated, delegatedCapture(name));
 			if (!delegatedCapture(name)) target.removeEventListener(name, dispatchDelegatedCapture, true);
 		}
-		for (const name of _delegatedCapture) {
+		for (const name of _delegatedCapture.keys()) {
 			target.removeEventListener(
 				name,
 				delegatedCapture(name) ? dispatchDelegated : dispatchDelegatedCapture,
@@ -18401,6 +18881,32 @@ const DISCRETE_EVENTS = new Set<string>([
  */
 let _dispatchDepth = 0;
 
+// Registration pays name parsing and category lookups once. Both native phases
+// share this record, including capture handlers registered after a root mounts.
+function createDelegatedEventType(name: string): DelegatedEventType {
+	return {
+		name,
+		bubbleKey: '$$' + name,
+		captureKey: CAPTURE_PREFIX + name,
+		flags:
+			(delegatedCapture(name) ? EVENT_NATIVE_CAPTURE : 0) |
+			(TARGET_ONLY_DELEGATED.has(name) ? EVENT_TARGET_ONLY : 0) |
+			(DISCRETE_EVENTS.has(name) ? EVENT_DISCRETE : 0) |
+			(RESTORE_EVENTS.has(name) ? EVENT_RESTORE : 0) |
+			(name === 'click' ||
+			name === 'dblclick' ||
+			name === 'mousedown' ||
+			name === 'mousemove' ||
+			name === 'mouseup'
+				? EVENT_DISABLED_MOUSE
+				: 0) |
+			(name === 'mouseenter' ? EVENT_DISABLED_ENTER : 0) |
+			(name === 'invalid' || EMULATED_BUBBLING_EVENTS.includes(name)
+				? EVENT_CUSTOM_NATIVE_ONLY
+				: 0),
+	};
+}
+
 // A bubble version closes capture-only flush fallbacks without retaining a DOM
 // path or a dispatch-completed flag on the Event. The same Event may be dispatched
 // again synchronously; every native delivery must start a fresh logical walk.
@@ -18411,19 +18917,38 @@ const DELEGATED_BUBBLE_VERSION = /* @__PURE__ */ Symbol('octane.bubbleVersion');
 // native stopImmediatePropagation must not abort an already-running logical queue.
 // These temporary methods still operate on the original browser Event, and the
 // exact prior own descriptors are restored before control returns to native code.
-const PROPAGATION_FLAGS = /* @__PURE__ */ Symbol('octane.propagationFlags');
-const NATIVE_STOP_PROPAGATION = /* @__PURE__ */ Symbol('octane.stopPropagation');
-const NATIVE_STOP_IMMEDIATE = /* @__PURE__ */ Symbol('octane.stopImmediatePropagation');
+interface DelegatedEventFrame {
+	event: Event | null;
+	flags: number;
+	stop: (() => void) | null;
+	immediate: (() => void) | null;
+	currentTarget: EventTarget | null;
+}
+// Private state belongs to the active logical phases, not to the native Event.
+// Nested dispatch reuses another frame; clearing it releases every Event/DOM
+// reference. Public method/accessor shadows still restore their exact lifetime.
+const DELEGATED_EVENT_FRAMES: DelegatedEventFrame[] = [];
+let delegatedEventFrameDepth = 0;
+
+function delegatedFrameFor(event: Event): DelegatedEventFrame | undefined {
+	for (let index = delegatedEventFrameDepth - 1; index >= 0; index--) {
+		const frame = DELEGATED_EVENT_FRAMES[index];
+		if (frame.event === event) return frame;
+	}
+}
+
 function stopDelegatedPropagation(this: Event): void {
-	if ((this as any)[PROPAGATION_FLAGS] !== undefined) (this as any)[PROPAGATION_FLAGS] |= 1;
-	const stop = (this as any)[NATIVE_STOP_PROPAGATION] || this.stopPropagation;
+	const frame = delegatedFrameFor(this);
+	if (frame !== undefined) frame.flags |= 1;
+	const stop = frame?.stop || this.stopPropagation;
 	// A consumer may retain the method and call it after native dispatch. The
 	// temporary dispatch state is gone then, but the restored native method lives on.
 	(stop === stopDelegatedPropagation ? Event.prototype.stopPropagation : stop).call(this);
 }
 function stopImmediateNativePropagation(this: Event): void {
-	if ((this as any)[PROPAGATION_FLAGS] !== undefined) (this as any)[PROPAGATION_FLAGS] |= 2;
-	const stop = (this as any)[NATIVE_STOP_IMMEDIATE] || this.stopImmediatePropagation;
+	const frame = delegatedFrameFor(this);
+	if (frame !== undefined) frame.flags |= 2;
+	const stop = frame?.immediate || this.stopImmediatePropagation;
 	(stop === stopImmediateNativePropagation ? Event.prototype.stopImmediatePropagation : stop).call(
 		this,
 	);
@@ -18458,14 +18983,21 @@ function beginDelegatedPropagation(
 	event: Event,
 	stop: PropertyDescriptor | undefined,
 	immediate: PropertyDescriptor | undefined | null,
-): void {
-	(event as any)[PROPAGATION_FLAGS] = 0;
-	(event as any)[NATIVE_STOP_PROPAGATION] = event.stopPropagation;
+): DelegatedEventFrame {
+	let frame = DELEGATED_EVENT_FRAMES[delegatedEventFrameDepth];
+	if (frame === undefined) {
+		frame = { event: null, flags: 0, stop: null, immediate: null, currentTarget: null };
+		DELEGATED_EVENT_FRAMES.push(frame);
+	}
+	delegatedEventFrameDepth++;
+	frame.event = event;
+	frame.flags = 0;
+	frame.stop = event.stopPropagation;
 	installPropagationMethod(event, 'stopPropagation', stop, STOP_PROPAGATION_DESCRIPTOR);
 	// Only emulated bubbling needs to distinguish a native immediate stop before
 	// starting another logical phase. Ordinary browser phases leave it untouched.
 	if (immediate !== null) {
-		(event as any)[NATIVE_STOP_IMMEDIATE] = event.stopImmediatePropagation;
+		frame.immediate = event.stopImmediatePropagation;
 		installPropagationMethod(
 			event,
 			'stopImmediatePropagation',
@@ -18473,6 +19005,7 @@ function beginDelegatedPropagation(
 			STOP_IMMEDIATE_DESCRIPTOR,
 		);
 	}
+	return frame;
 }
 
 function endDelegatedPropagation(
@@ -18480,23 +19013,24 @@ function endDelegatedPropagation(
 	stop: PropertyDescriptor | undefined,
 	immediate: PropertyDescriptor | undefined | null,
 ): void {
+	const frame = DELEGATED_EVENT_FRAMES[--delegatedEventFrameDepth];
+	frame.event = null;
+	frame.stop = null;
+	frame.immediate = null;
+	frame.currentTarget = null;
 	if (stop === undefined) delete (event as any).stopPropagation;
 	else Object.defineProperty(event, 'stopPropagation', stop);
 	if (immediate !== null) {
 		if (immediate === undefined) delete (event as any).stopImmediatePropagation;
 		else Object.defineProperty(event, 'stopImmediatePropagation', immediate);
-		delete (event as any)[NATIVE_STOP_IMMEDIATE];
 	}
-	delete (event as any)[PROPAGATION_FLAGS];
-	delete (event as any)[NATIVE_STOP_PROPAGATION];
 }
 
 // A receiver-specific target lets one accessor survive nested native dispatch.
-const CURRENT_TARGET_NODE = /* @__PURE__ */ Symbol('octane.currentTarget');
 const CURRENT_TARGET_DESCRIPTOR: PropertyDescriptor = {
 	configurable: true,
-	get(this: Event): EventTarget | null {
-		return (this as any)[CURRENT_TARGET_NODE] as EventTarget | null;
+	get(this: Event): EventTarget | null | undefined {
+		return delegatedFrameFor(this)?.currentTarget;
 	},
 };
 // Synchronous nested delegated walks borrow disjoint frames from this one stack.
@@ -18505,15 +19039,11 @@ const CAPTURE_PATH: any[] = [];
 // separate frame, and clearing the frame releases all node/handler references.
 const CAPTURE_SLOTS: EventSlot[] = [];
 
-function snapshotDelegatedSlots(base: number, key: string, event: Event): void {
-	const type = event.type;
+function snapshotDelegatedSlots(base: number, type: DelegatedEventType, capture: boolean): void {
+	const key = capture ? type.captureKey : type.bubbleKey;
 	const suppressDisabled =
-		type === 'click' ||
-		type === 'dblclick' ||
-		type === 'mousedown' ||
-		type === 'mousemove' ||
-		type === 'mouseup' ||
-		(type === 'mouseenter' && key[2] !== 'c');
+		(type.flags & EVENT_DISABLED_MOUSE) !== 0 ||
+		(!capture && (type.flags & EVENT_DISABLED_ENTER) !== 0);
 	for (let index = base; index < CAPTURE_PATH.length; index++) {
 		const node = CAPTURE_PATH[index];
 		const slot = node[key] as EventSlot;
@@ -18542,11 +19072,11 @@ function preserveDispatchedBundle(bundle: HandlerBundle): void {
 				snapshot =
 					typeof args !== 'number'
 						? { fn: bundle.fn, args: args.slice(), [EVENT_SLOT_KIND]: HANDLER_BUNDLE_KIND }
-						: args === 1
-							? { fn: bundle.fn, args: 1, a0: bundle.a0, [EVENT_SLOT_KIND]: HANDLER_BUNDLE_KIND }
+						: args === 1 || args === -1
+							? { fn: bundle.fn, args, a0: bundle.a0, [EVENT_SLOT_KIND]: HANDLER_BUNDLE_KIND }
 							: {
 									fn: bundle.fn,
-									args: 2,
+									args,
 									a0: bundle.a0,
 									a1: bundle.a1,
 									[EVENT_SLOT_KIND]: HANDLER_BUNDLE_KIND,
@@ -18658,6 +19188,8 @@ function buildDelegatedPath(event: Event, listener: Node, path = event.composedP
 	const output = CAPTURE_PATH;
 	const base = output.length;
 	const epoch = (event as any)[EVENT_ROOT_EPOCH] ?? eventRootEpoch;
+	// Portal teardown after capture cannot erase the current event's logical route.
+	const mayHavePortal = portalEventTargetCount !== 0 || epoch !== eventRootEpoch;
 	const listenerIndex = path.indexOf(listener);
 	if (listenerIndex < 0) return 0;
 	// The usual application has one unchanged public root and no portals. It
@@ -18667,7 +19199,7 @@ function buildDelegatedPath(event: Event, listener: Node, path = event.composedP
 		let i = 0;
 		for (; i < listenerIndex; i++) {
 			const node = eventPathNode(path[i]);
-			if (node === null || node.$$portalParent != null) break;
+			if (node === null || (mayHavePortal && node.$$portalParent != null)) break;
 			output.push(node);
 		}
 		if (i === listenerIndex) return output.length - base;
@@ -18699,7 +19231,7 @@ function buildDelegatedPath(event: Event, listener: Node, path = event.composedP
 			}
 
 			output.push(node);
-			const logicalParent = node.$$portalParent;
+			const logicalParent = mayHavePortal ? node.$$portalParent : undefined;
 			if (logicalParent != null) {
 				// Use the actual portal container, NOT composedPath's next item:
 				// a direct portal child can be slotted, making that next item a
@@ -18758,9 +19290,9 @@ function buildDelegatedPath(event: Event, listener: Node, path = event.composedP
 }
 
 // Invoke one event slot — a bare handler `fn(event)` or a nominal arity-specific
-// bundle (the compiler's zero-argument-arrow optimisation) as `fn(...args)`. A bundled
-// arrow never observes its native event, so forwarding that event to its callee
-// would change the authored callback's argument list.
+// bundle. Ordinary bundles call `fn(...args)` without an event, preserving the
+// authored call argument list. Negative fixed arities prepend the native event
+// for compiler-lifted block arrows that receive their lexical captures by value.
 //
 // GUARDED like the platform guards each listener invocation: a throwing handler
 // (or a non-function listener value that arrived through a spread/prop) reports
@@ -18805,8 +19337,12 @@ function fireEventSlot(slot: EventSlot, event: Event): void {
 				}
 			} else if (a === 1) {
 				bundle.fn(bundle.a0);
-			} else {
+			} else if (a === 2) {
 				bundle.fn(bundle.a0, bundle.a1);
+			} else if (a === -1) {
+				bundle.fn(event, bundle.a0);
+			} else {
+				bundle.fn(event, bundle.a0, bundle.a1);
 			}
 			return;
 		}
@@ -18862,8 +19398,8 @@ function reportListenerError(err: unknown): void {
 // publish after the dispatching script yields. Non-discrete events keep microtask
 // batching too; they must not be staged with an unrelated async Action merely
 // because they do not flush synchronously here.
-function maybeFlushDiscrete(type: string): void {
-	if (_dispatchDepth === 0 && DISCRETE_EVENTS.has(type) && pendingRestores.length > 0) {
+function maybeFlushDiscrete(type: DelegatedEventType): void {
+	if (_dispatchDepth === 0 && (type.flags & EVENT_DISCRETE) !== 0 && pendingRestores.length > 0) {
 		// Commit handler-scheduled work first, so the controlled restore below
 		// compares the DOM against the values the handlers just rendered.
 		if (!inFlush && hasPendingWork()) {
@@ -18885,23 +19421,22 @@ function maybeFlushDiscrete(type: string): void {
 	}
 	// Clear after the click's own handlers (and its outermost flush, when this is
 	// not a nested dispatch), including canceled/eventless activations.
-	if (type === 'click') activationCheckable = null;
+	if (type.name === 'click') activationCheckable = null;
 }
 
-function finishCaptureDispatch(event: Event): void {
-	const type = event.type;
-	if (!event.bubbles || event.cancelBubble || !_delegated.has(type)) {
-		if (event.bubbles && _delegated.has(type)) maybeEnqueueRestore(event);
+function finishCaptureDispatch(event: Event, type: DelegatedEventType): void {
+	if (!event.bubbles || event.cancelBubble || (type.flags & EVENT_BUBBLE) === 0) {
+		if (event.bubbles && (type.flags & EVENT_BUBBLE) !== 0) maybeEnqueueRestore(event, type);
 		maybeFlushDiscrete(type);
 		return;
 	}
-	if (!DISCRETE_EVENTS.has(type)) return;
+	if ((type.flags & EVENT_DISCRETE) === 0) return;
 	// A missed bubble can leave a restore queued by a nested event in capture.
 	// The target itself may also become controlled in a native listener below
 	// this root, so retain the fallback for form controls even when $$ctrl is
 	// not armed yet. Other events have no controlled work to finish here.
 	if (pendingRestores.length === 0) {
-		if (!RESTORE_EVENTS.has(type)) return;
+		if ((type.flags & EVENT_RESTORE) === 0) return;
 		const tag = (event.target as Element | null)?.localName;
 		if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') return;
 	}
@@ -18911,7 +19446,7 @@ function finishCaptureDispatch(event: Event): void {
 		// (controlled restores and their sync flush). When a native listener stops
 		// the event below its root, close that window here instead.
 		if ((event as any)[DELEGATED_BUBBLE_VERSION] === bubbleVersion) {
-			maybeEnqueueRestore(event);
+			maybeEnqueueRestore(event, type);
 			maybeFlushDiscrete(type);
 		}
 	};
@@ -18933,12 +19468,13 @@ function finishCaptureDispatch(event: Event): void {
 }
 
 function dispatchDelegated(this: Node, event: Event): void {
-	const nativeCapture = delegatedCapture(event.type);
+	const type = _delegated.get(event.type) ?? _delegatedCapture.get(event.type);
+	if (type === undefined) return;
+	const nativeCapture = (type.flags & EVENT_NATIVE_CAPTURE) !== 0;
 	let path = nativeCapture ? prepareDelegatedEvent(event, this) : undefined;
 	(event as any)[DELEGATED_BUBBLE_VERSION] = ((event as any)[DELEGATED_BUBBLE_VERSION] || 0) + 1;
-	maybeEnqueueRestore(event);
-	const key = '$$' + event.type;
-	const targetOnly = TARGET_ONLY_DELEGATED.has(event.type);
+	maybeEnqueueRestore(event, type);
+	const targetOnly = (type.flags & EVENT_TARGET_ONLY) !== 0;
 	_dispatchDepth++;
 	const node = event.target as any;
 	// A submit dispatch targeting a form opens the manual-action useFormStatus
@@ -18954,38 +19490,39 @@ function dispatchDelegated(this: Node, event: Event): void {
 	const pathBase = CAPTURE_PATH.length;
 	let stop: PropertyDescriptor | undefined;
 	let propagationStarted = false;
+	let frame: DelegatedEventFrame;
 	try {
 		// Non-bubbling families share one native capture callback. Run the logical
 		// capture queue first, independent of module registration order, and honor
 		// a stop within that phase before starting the emulated bubble queue.
-		if (nativeCapture && _delegatedCapture.has(event.type)) {
+		if (nativeCapture && (type.flags & EVENT_CAPTURE) !== 0) {
 			path ??= event.composedPath();
-			if (dispatchDelegatedCapture.call(this, event, path)) return;
+			if (dispatchDelegatedCapture.call(this, event, path, type)) return;
 		}
-		if (!_delegated.has(event.type)) return;
+		if ((type.flags & EVENT_BUBBLE) === 0) return;
 		// Custom elements receive known nonbubbling events through authored
 		// capture handlers only. They do not install the native target listener
 		// that makes these built-in host events propagate in the bubble queue.
 		if (
 			node?.nodeType === 1 &&
 			isHtmlCustomElement(node) &&
-			(event.type === 'invalid' || EMULATED_BUBBLING_EVENTS.includes(event.type))
+			(type.flags & EVENT_CUSTOM_NATIVE_ONLY) !== 0
 		)
 			return;
 		buildDelegatedPath(event, this, path);
-		snapshotDelegatedSlots(pathBase, key, event);
+		snapshotDelegatedSlots(pathBase, type, false);
 		stop = Object.getOwnPropertyDescriptor(event, 'stopPropagation');
 		propagationStarted = true;
-		beginDelegatedPropagation(event, stop, null);
+		frame = beginDelegatedPropagation(event, stop, null);
 		for (let i = pathBase; i < CAPTURE_PATH.length; i++) {
 			const current = CAPTURE_PATH[i];
 			// Target-only native families never transfer a handler to a root boundary.
 			if (targetOnly && current !== event.target) break;
 			const slot = CAPTURE_SLOTS[i];
 			if (slot != null) {
-				setCurrentTarget(event, current);
+				setCurrentTarget(event, current, frame);
 				fireEventSlot(slot, event);
-				if (((event as any)[PROPAGATION_FLAGS] & 1) !== 0) break;
+				if ((frame.flags & 1) !== 0) break;
 			}
 			if (targetOnly) break;
 		}
@@ -19016,42 +19553,48 @@ function dispatchDelegated(this: Node, event: Event): void {
 			reportListenerError(error);
 		}
 		_dispatchDepth--;
-		maybeFlushDiscrete(event.type);
+		maybeFlushDiscrete(type);
 	}
 }
 
 // Capture runs only this native listener's segment, in reverse path order.
 // Returning whether this queue stopped native propagation lets the shared
 // non-bubbling listener decide whether it may start its emulated bubble queue.
-function dispatchDelegatedCapture(this: Node, event: Event, path?: EventTarget[]): boolean {
+function dispatchDelegatedCapture(
+	this: Node,
+	event: Event,
+	path?: EventTarget[],
+	type = _delegated.get(event.type) ?? _delegatedCapture.get(event.type),
+): boolean {
 	path ??= prepareDelegatedEvent(event, this);
-	if (!_delegatedCapture.has(event.type)) return false;
+	if (type === undefined || (type.flags & EVENT_CAPTURE) === 0) return false;
 	path ??= event.composedPath();
-	if (!event.bubbles || !_delegated.has(event.type)) maybeEnqueueRestore(event);
-	const key = CAPTURE_PREFIX + event.type;
+	if (!event.bubbles || (type.flags & EVENT_BUBBLE) === 0) maybeEnqueueRestore(event, type);
 	const pathBase = CAPTURE_PATH.length;
 	buildDelegatedPath(event, this, path);
-	snapshotDelegatedSlots(pathBase, key, event);
+	snapshotDelegatedSlots(pathBase, type, true);
 	const stop = Object.getOwnPropertyDescriptor(event, 'stopPropagation');
-	const immediate = delegatedCapture(event.type)
-		? Object.getOwnPropertyDescriptor(event, 'stopImmediatePropagation')
-		: null;
+	const immediate =
+		(type.flags & EVENT_NATIVE_CAPTURE) !== 0
+			? Object.getOwnPropertyDescriptor(event, 'stopImmediatePropagation')
+			: null;
 	const wasCancelled = event.cancelBubble;
 	let stopped = false;
 	_dispatchDepth++;
 	const nativeBatch = beginNativeEventBatch(event);
+	let frame: DelegatedEventFrame | undefined;
 	try {
-		beginDelegatedPropagation(event, stop, immediate);
+		frame = beginDelegatedPropagation(event, stop, immediate);
 		for (let i = CAPTURE_PATH.length - 1; i >= pathBase; i--) {
 			const slot = CAPTURE_SLOTS[i];
 			if (slot != null) {
-				setCurrentTarget(event, CAPTURE_PATH[i]);
+				setCurrentTarget(event, CAPTURE_PATH[i], frame);
 				fireEventSlot(slot, event);
-				if (((event as any)[PROPAGATION_FLAGS] & 1) !== 0) break;
+				if ((frame.flags & 1) !== 0) break;
 			}
 		}
 	} finally {
-		stopped = (event as any)[PROPAGATION_FLAGS] !== 0 || (!wasCancelled && event.cancelBubble);
+		stopped = frame?.flags !== 0 || (!wasCancelled && event.cancelBubble);
 		CAPTURE_PATH.length = pathBase;
 		CAPTURE_SLOTS.length = pathBase;
 		endDelegatedPropagation(event, stop, immediate);
@@ -19060,14 +19603,14 @@ function dispatchDelegatedCapture(this: Node, event: Event, path?: EventTarget[]
 			endNativeEventBatch(
 				event,
 				nativeBatch,
-				event.bubbles && !event.cancelBubble && _delegated.has(event.type),
+				event.bubbles && !event.cancelBubble && (type.flags & EVENT_BUBBLE) !== 0,
 				reportListenerError,
 			);
 		} catch (error) {
 			reportListenerError(error);
 		}
 		_dispatchDepth--;
-		finishCaptureDispatch(event);
+		finishCaptureDispatch(event, type);
 	}
 	return stopped;
 }
@@ -19080,14 +19623,17 @@ function noop(): void {}
 // measurement/indexOf). Native `currentTarget` is the listener's attach node (our
 // delegation ROOT), so shadow it with a configurable own property during each handler and
 // remove the shadow after the walk (restoring native semantics).
-function setCurrentTarget(event: Event, node: EventTarget | null): void {
-	(event as any)[CURRENT_TARGET_NODE] = node;
+function setCurrentTarget(
+	event: Event,
+	node: EventTarget | null,
+	frame: DelegatedEventFrame,
+): void {
+	frame.currentTarget = node;
 	Object.defineProperty(event, 'currentTarget', CURRENT_TARGET_DESCRIPTOR);
 }
 function clearCurrentTarget(event: Event): void {
 	// Deleting the own property re-exposes Event.prototype's native getter.
 	delete (event as any).currentTarget;
-	delete (event as any)[CURRENT_TARGET_NODE];
 }
 
 // ---------------------------------------------------------------------------
@@ -20075,20 +20621,22 @@ function projectSelectValue(
 	}
 	if (typeof sv !== 'string') {
 		for (let i = 0; i < options.length; i++) {
-			const selected = sv.has(options[i].value);
-			if (options[i].selected !== selected) options[i].selected = selected;
-			if (setDefaultSelected) options[i].defaultSelected = selected;
+			const option = options[i];
+			const selected = sv.has(option.value);
+			if (option.selected !== selected) option.selected = selected;
+			if (setDefaultSelected) option.defaultSelected = selected;
 		}
 		return;
 	}
 	let defaultOption: HTMLOptionElement | null = null;
 	for (let i = 0; i < options.length; i++) {
-		if (options[i].value === sv) {
-			options[i].selected = true;
-			if (setDefaultSelected) options[i].defaultSelected = true;
+		const option = options[i];
+		if (option.value === sv) {
+			option.selected = true;
+			if (setDefaultSelected) option.defaultSelected = true;
 			return;
 		}
-		if (defaultOption === null && !options[i].disabled) defaultOption = options[i];
+		if (defaultOption === null && !option.disabled) defaultOption = option;
 	}
 	if (defaultOption !== null) defaultOption.selected = true;
 }
@@ -20255,48 +20803,57 @@ export function setFormControlSources(
 	let multiple: unknown;
 	const tag = el.localName;
 
-	const assign = (name: string, next: unknown) => {
-		switch (name) {
-			case 'value':
-				value = next;
-				break;
-			case 'defaultValue':
-				defaultValue = next;
-				break;
-			case 'checked':
-				if (tag === 'input') checked = next;
-				break;
-			case 'defaultChecked':
-				if (tag === 'input') defaultChecked = next;
-				break;
-			case 'multiple':
-				if (tag === 'select') multiple = next;
-				break;
-		}
-	};
-
 	for (let i = 0; i < sources.length; i++) {
 		const source = sources[i];
 		if (!source[0]) {
-			assign(source[1] as string, source[2]);
+			const name = source[1];
+			const next = source[2];
+			switch (name) {
+				case 'value':
+					value = next;
+					break;
+				case 'defaultValue':
+					defaultValue = next;
+					break;
+				case 'checked':
+					if (tag === 'input') checked = next;
+					break;
+				case 'defaultChecked':
+					if (tag === 'input') defaultChecked = next;
+					break;
+				case 'multiple':
+					if (tag === 'select') multiple = next;
+					break;
+			}
 			continue;
 		}
 		const spread = source[1];
 		if (spread == null || (typeof spread !== 'object' && typeof spread !== 'function')) continue;
 		const object = Object(spread) as Record<string, unknown>;
-		if (Object.prototype.propertyIsEnumerable.call(object, 'value')) assign('value', object.value);
+		if (Object.prototype.propertyIsEnumerable.call(object, 'value')) value = object.value;
 		if (Object.prototype.propertyIsEnumerable.call(object, 'defaultValue'))
-			assign('defaultValue', object.defaultValue);
+			defaultValue = object.defaultValue;
 		if (tag === 'input') {
-			if (Object.prototype.propertyIsEnumerable.call(object, 'checked'))
-				assign('checked', object.checked);
+			if (Object.prototype.propertyIsEnumerable.call(object, 'checked')) checked = object.checked;
 			if (Object.prototype.propertyIsEnumerable.call(object, 'defaultChecked'))
-				assign('defaultChecked', object.defaultChecked);
+				defaultChecked = object.defaultChecked;
 		} else if (tag === 'select' && Object.prototype.propertyIsEnumerable.call(object, 'multiple')) {
-			assign('multiple', object.multiple);
+			multiple = object.multiple;
 		}
 	}
+	applyFormControlValues(el, tag, value, defaultValue, checked, defaultChecked, multiple);
+}
 
+/** Apply already-resolved values without rescanning a compiled host's sources. */
+function applyFormControlValues(
+	el: Element,
+	tag: string,
+	value: unknown,
+	defaultValue: unknown,
+	checked: unknown,
+	defaultChecked: unknown,
+	multiple: unknown,
+): void {
 	const ctrl = armControlled(el);
 	const first = !ctrl.formSeen;
 	const previousMultiple = ctrl.formMultiple;
@@ -20673,9 +21230,9 @@ function isControlledHostProp(el: Element, name: string): boolean {
  * form control and the event can carry a user edit (see RESTORE_EVENTS).
  * Called by both delegated dispatchers, right after their dispatch stamp.
  */
-function maybeEnqueueRestore(event: Event): void {
+function maybeEnqueueRestore(event: Event, type: DelegatedEventType): void {
 	const t = event.target as any;
-	if (t === null || t.$$ctrl === undefined || !RESTORE_EVENTS.has(event.type)) return;
+	if (t === null || t.$$ctrl === undefined || (type.flags & EVENT_RESTORE) === 0) return;
 	const ctrl = t.$$ctrl as ControlledState;
 	if (event.type === 'input' && ctrl.compositionEndTask !== undefined) {
 		const inputEvent = event as InputEvent;
@@ -20799,6 +21356,7 @@ function registerPortalEventRange(target: Node, portal: PortalSlot): void {
 		ranges = new Set();
 		_portalEventRanges.set(target, ranges);
 		portalEventTargetCount++;
+		eventRootEpoch++;
 	}
 	ranges.add(portal);
 	(portal.start as PortalEventBoundary).$$portalEventRange = portal;
@@ -20816,6 +21374,7 @@ function unregisterPortalEventRange(target: Node, portal: PortalSlot): void {
 	if (ranges.size === 0) {
 		_portalEventRanges.delete(target);
 		portalEventTargetCount--;
+		eventRootEpoch++;
 	}
 }
 
@@ -23330,8 +23889,9 @@ function applyDeoptProp(el: Element, name: string, v: any, ownerBlock: Block): v
 				ev.key,
 				process.env.NODE_ENV !== 'production' ? devEventListener(name, v) : v,
 			);
-			if (ev.capture) delegateCaptureEvents([ev.type]);
-			else delegateEvents([ev.type]);
+			if (ev.capture) {
+				if (!_delegatedCapture.has(ev.type)) delegateCaptureEvents([ev.type]);
+			} else if (!_delegated.has(ev.type)) delegateEvents([ev.type]);
 		} else {
 			setAttribute(el, name, v);
 		}
@@ -23458,13 +24018,13 @@ interface HostComponentSlot {
 	ref: any;
 	// The props applied last render — diffed against the next render so props/events that
 	// DISAPPEARED get removed (not left stale on the reused element).
-	props?: any;
+	props: any;
 	// Stable delegating children body + its current target (see hostComponent).
-	body?: ComponentBody;
-	latest?: ComponentBody | null;
+	body: ComponentBody | undefined;
+	latest: ComponentBody | null | undefined;
 	// Dedicated sub-scope holding the children's childSlot (slot 0), so the children
 	// reconcile/unmount via the Block tree without stamping a derived key on `scope`.
-	childScope?: Scope;
+	childScope: Scope | undefined;
 }
 
 // Render a host element (`<tag>`) that WRAPS a children render-body, from runtime
@@ -23489,10 +24049,21 @@ export function hostComponent(
 	const block = scope.block;
 	let state = scope.slots[slot] as HostComponentSlot | undefined;
 	if (state === undefined) {
-		const el = document.createElement(tag);
+		// Runtime adapters inherit the actual destination, including SVG portals
+		// and foreignObject children, just like descriptor/string-tag hosts.
+		const ns = inferTagNs(tag, deoptChildNamespace(block.parentNode));
+		const el = ns === undefined ? document.createElement(tag) : document.createElementNS(ns, tag);
 		// The children childSlot exclusively OWNS `el`'s content (owns-parent
 		// mode) — no `<!---->` insertion anchor needed (marker-elision M2).
-		state = { el, anchor: null, ref: undefined };
+		state = {
+			el,
+			anchor: null,
+			ref: undefined,
+			props: undefined,
+			body: undefined,
+			latest: undefined,
+			childScope: undefined,
+		};
 		scope.slots[slot] = state;
 		// Children render into a dedicated sub-scope (registered on `scope.children` so
 		// unmountScope walks into it), keeping the children's slot off `scope` itself.
@@ -23537,6 +24108,7 @@ export function hostComponent(
 // while className/style/events/attributes are idempotently re-set.
 function applyHostProps(el: Element, props: any, scope: Scope, state: HostComponentSlot): void {
 	const prev = state.props;
+	const compareLive = prev !== undefined && activeHydration() === null && !isHtmlCustomElement(el);
 	let needsCheckedInitialization = prev === undefined && el.localName === 'input';
 	if (ROOT_RENDER_TRANSACTION !== null && prev !== props) journalObjectOnce(state);
 	// REMOVE props/events present last render but gone now, via the shared removeHostProp
@@ -23591,7 +24163,12 @@ function applyHostProps(el: Element, props: any, scope: Scope, state: HostCompon
 				state.ref = v;
 			}
 		} else if (name === 'className' || name === 'class') {
-			setDeoptClass(el, v);
+			// Compare the current target, not a same-named previous prop: another
+			// alias can have won or disappeared, and foreign code can edit the DOM.
+			// Mutable class arrays/objects still pass through normalization.
+			if (!compareLive || typeof v !== 'string' || el.getAttribute('class') !== v) {
+				setDeoptClass(el, v);
+			}
 		} else if (name === 'style') {
 			setStyle(el as HTMLElement, v, prev != null ? prev.style : undefined);
 		} else {
@@ -23605,12 +24182,26 @@ function applyHostProps(el: Element, props: any, scope: Scope, state: HostCompon
 				} else if (!_delegated.has(ev.type)) {
 					delegateEvents([ev.type]);
 				}
-				setEventHandler(
-					el,
-					ev.key,
-					process.env.NODE_ENV !== 'production' ? devEventListener(name, v) : v,
-				);
+				const handler = process.env.NODE_ENV !== 'production' ? devEventListener(name, v) : v;
+				if (!compareLive || (el as any)[ev.key] !== handler) setEventHandler(el, ev.key, handler);
 			} else if (prev === undefined || name !== 'autoFocus' || isHtmlCustomElement(el)) {
+				// These string attributes have no coercion, property projection, or
+				// URL policy. Matching live values need neither a write nor an undo
+				// snapshot. The remaining attributes retain their complete setter.
+				if (
+					compareLive &&
+					(process.env.NODE_ENV === 'production' || (el as any).__oct_loc === undefined) &&
+					typeof v === 'string' &&
+					(name === 'id' ||
+						name === 'title' ||
+						name === 'role' ||
+						name === 'for' ||
+						name === 'htmlFor' ||
+						name.startsWith('data-') ||
+						name.startsWith('aria-')) &&
+					el.getAttribute(name === 'htmlFor' ? 'for' : name) === v
+				)
+					continue;
 				setAttribute(el, name, v);
 			}
 		}
@@ -23655,19 +24246,59 @@ interface DeoptStamped {
 function getDeoptDesc(n: Node): ElementDescriptor | undefined {
 	return (n as Node & DeoptStamped)[DEOPT_DESC];
 }
+function sameDeoptDesc(
+	previous: ElementDescriptor | undefined,
+	next: ElementDescriptor,
+	children: unknown,
+): boolean {
+	return (
+		previous !== undefined &&
+		previous.type === next.type &&
+		previous.props === next.props &&
+		previous.key === next.key &&
+		previous.ref === next.ref &&
+		previous.children === children
+	);
+}
+
+function unchangedScopedHostDescriptor(block: Block, d: ElementDescriptor): boolean {
+	const resolve = (d as ScopedValueDescriptor<any>)[SCOPED_VALUE_RECORD];
+	if (resolve === undefined && (d as any)[SCOPED_CHILDREN_RESOLVER] === undefined) return true;
+	const next = resolve === undefined ? d : resolve();
+	const previous = block.deoptNode === null ? undefined : getDeoptDesc(block.deoptNode);
+	return previous === next || sameDeoptDesc(previous, next, next.children);
+}
+
 function setDeoptDesc(el: Element, d: ElementDescriptor): void {
 	// Preserve the record committed to this DOM node. A deferred JSX shell can
 	// resolve differently after a Provider update; stamping the shell itself
 	// would make both sides of the next prop diff observe the new record and
 	// would run user code outside render while Suspense detaches subtree refs.
 	const resolveScopedRecord = (d as ScopedValueDescriptor<any>)[SCOPED_VALUE_RECORD];
+	let record = resolveScopedRecord === undefined ? d : resolveScopedRecord();
+	if ((record as any)[SCOPED_CHILDREN_RESOLVER] !== undefined) {
+		// A deferred-children shell is stable across different resolved trees too.
+		// Retain the actual children used by this host so a later raw-host upgrade
+		// can match the old DOM, without resolving its old keys in the new scope.
+		const children = record.children;
+		const previous = getDeoptDesc(el);
+		record = sameDeoptDesc(previous, record, children)
+			? previous!
+			: {
+					$$kind: ELEMENT_TAG,
+					type: record.type,
+					props: record.props,
+					key: record.key,
+					ref: record.ref,
+					children,
+				};
+	}
 	// A held descriptor retry restores host props too. Restore their comparison
 	// record with them or the final retry will mistake aborted props for live ones.
 	if (TRANSITION_JOURNAL !== null) {
 		TRANSITION_JOURNAL.push(JOURNAL_PROP, el, DEOPT_DESC, getDeoptDesc(el));
 	}
-	(el as Element & DeoptStamped)[DEOPT_DESC] =
-		resolveScopedRecord === undefined ? d : resolveScopedRecord();
+	(el as Element & DeoptStamped)[DEOPT_DESC] = record;
 }
 
 type DeoptWrapperKind = 'array' | 'fragment';
@@ -23749,8 +24380,9 @@ function deoptWrapperKind(value: any[]): DeoptWrapperKind {
 }
 
 const DEOPT_KEY_STRINGIFY = JSON.stringify;
+const DEOPT_KEY_STRING = String;
 
-function nestedImplicitKeyPrefix(path: readonly (string | number)[]): string | null {
+function nestedDeoptKeyPrefix(path: readonly (string | number)[]): string | null {
 	// Object-valued wrapper keys and custom array serialization may differ for
 	// each leaf. Keep their existing full-key serialization path.
 	if (JSON.stringify !== DEOPT_KEY_STRINGIFY || 'toJSON' in path) return null;
@@ -23758,7 +24390,7 @@ function nestedImplicitKeyPrefix(path: readonly (string | number)[]): string | n
 		const type = typeof path[i];
 		if (type !== 'string' && type !== 'number') return null;
 	}
-	return '[' + JSON.stringify(path) + ',"index",';
+	return '[' + JSON.stringify(path) + ',';
 }
 
 function appendScopedDeoptKey(
@@ -23767,7 +24399,7 @@ function appendScopedDeoptKey(
 	item: any,
 	index: number,
 	key: any,
-	implicitPrefix: string | null | undefined,
+	keyPrefix: string | null | undefined,
 ): string | null | undefined {
 	// Reconciliation keys are internal: top-level implicit positions are numbers,
 	// explicit keys carry a 'k' prefix, and nested paths are JSON strings. These
@@ -23782,20 +24414,30 @@ function appendScopedDeoptKey(
 	// explicit 'k' keys; numeric indices are distinct from both string forms.
 	if (path.length === 0) {
 		outKeys.push(explicit ? 'k' + String(key) : index);
-		return implicitPrefix;
+		return keyPrefix;
 	}
-	// Initialize only for the first implicit leaf: keyed-only wrappers must not
-	// pay for a prefix they cannot reuse. `null` disables caching for this scope;
-	// `undefined` means no implicit leaf has needed its prefix yet.
-	if (!explicit) {
-		if (implicitPrefix === undefined) implicitPrefix = nestedImplicitKeyPrefix(path);
-		if (implicitPrefix !== null && JSON.stringify === DEOPT_KEY_STRINGIFY && !('toJSON' in path)) {
-			outKeys.push(implicitPrefix + index + ']');
-			return implicitPrefix;
+	// Only inert keys can share a wrapper prefix. Keep custom coercion on the
+	// original expression below, including its serializer/callee lookup order.
+	if (
+		keyPrefix !== null &&
+		(!explicit || (typeof key === 'string' && String === DEOPT_KEY_STRING)) &&
+		JSON.stringify === DEOPT_KEY_STRINGIFY &&
+		!('toJSON' in path)
+	) {
+		if (keyPrefix === undefined) keyPrefix = nestedDeoptKeyPrefix(path);
+		if (keyPrefix !== null) {
+			outKeys.push(
+				explicit
+					? keyPrefix + '"key",' + JSON.stringify(String(key)) + ']'
+					: keyPrefix + '"index",' + index + ']',
+			);
+			return keyPrefix;
 		}
 	}
 	outKeys.push(JSON.stringify([path, explicit ? 'key' : 'index', explicit ? String(key) : index]));
-	return implicitPrefix;
+	// A custom serializer may retain or mutate this path, even if it restores
+	// the built-ins before the next sibling. Never reuse its old prefix again.
+	return null;
 }
 
 // Flatten arrays and Fragment descriptors to renderable leaves while retaining
@@ -23813,20 +24455,13 @@ function flattenReactChildContainer(
 ): void {
 	const keyFn = kind === 'fragment' ? deoptKeyPositional : deoptKey;
 	const count = children.length;
-	let implicitPrefix: string | null | undefined = count > 1 ? undefined : null;
+	let keyPrefix: string | null | undefined = count > 1 ? undefined : null;
 	for (let i = 0; i < count; i++) {
 		const item = children[i];
 		if (isFragmentDescriptor(item)) {
 			if (item.ref != null || hasOwnProp.call(item.props, 'ref')) {
 				outItems.push(fragmentRefDescriptor(item));
-				implicitPrefix = appendScopedDeoptKey(
-					outKeys,
-					path,
-					item,
-					i,
-					keyFn(item, i),
-					implicitPrefix,
-				);
+				keyPrefix = appendScopedDeoptKey(outKeys, path, item, i, keyFn(item, i), keyPrefix);
 				continue;
 			}
 			const nested = fragmentDescriptorChildren(item);
@@ -23859,7 +24494,7 @@ function flattenReactChildContainer(
 			continue;
 		}
 		outItems.push(item);
-		implicitPrefix = appendScopedDeoptKey(outKeys, path, item, i, keyFn(item, i), implicitPrefix);
+		keyPrefix = appendScopedDeoptKey(outKeys, path, item, i, keyFn(item, i), keyPrefix);
 	}
 }
 
@@ -24070,7 +24705,7 @@ function reconcileDeoptChildren(el: Element, children: any, ownerBlock: Block): 
 	const next: any[] = [];
 	const nextKeys: any[] = [];
 	flattenDeoptChildrenKeyed(next, nextKeys, children, '');
-	const existing = el.childNodes;
+	const firstChild = getFirstChild(el);
 	const journal =
 		ROOT_RENDER_TRANSACTION !== null &&
 		el.parentNode !== null &&
@@ -24080,7 +24715,7 @@ function reconcileDeoptChildren(el: Element, children: any, ownerBlock: Block): 
 	// Fresh element (first build / fresh client mount) — nothing to reconcile against,
 	// so just build + append each child. Skips the keyed-match Map / Set / reorder
 	// bookkeeping below, which is the hot path for large initial mounts.
-	if (existing.length === 0) {
+	if (firstChild === null) {
 		for (let i = 0; i < next.length; i++) {
 			const node = reconcileDeoptNode(null, next[i], ownerBlock, childNs);
 			if (node !== null) {
@@ -24109,7 +24744,7 @@ function reconcileDeoptChildren(el: Element, children: any, ownerBlock: Block): 
 	let hydrationOwnsUnstamped: boolean | undefined;
 	let byKey: Map<any, Node> | null = null;
 	const unstamped: Node[] = [];
-	let scan: Node | null = getFirstChild(el);
+	let scan: Node | null = firstChild;
 	while (scan !== null) {
 		const rangeEnd = (scan as any).$$portalEnd as Node | undefined;
 		if (rangeEnd != null) {
@@ -24176,14 +24811,13 @@ function reconcileDeoptChildren(el: Element, children: any, ownerBlock: Block): 
 			}
 		}
 	}
-	// Order survivors/new nodes to match the descriptor. With foreign ranges present,
-	// index against the i-th OWNED live child (a foreign range floats in place,
-	// like a React portal whose container children reorder around it).
+	// Advance through owned live children once. Indexed childNodes reads restart
+	// native list walks after each insertion; foreign ranges also must not make
+	// every survivor rescan the preceding siblings.
+	let cursor: Node | null = getFirstChild(el);
 	for (let i = 0; i < result.length; i++) {
 		const want = result[i];
-		const at = hasForeign
-			? liveOwnedChildAt(el, i, hydrationOwnsUnstamped === true)
-			: (existing[i] ?? null);
+		const at = hasForeign ? nextDeoptOwnedChild(cursor, hydrationOwnsUnstamped === true) : cursor;
 		if (at !== want) {
 			if (journal) journalRootChildren(el);
 			if (renderingFocus === null) el.insertBefore(want, at);
@@ -24192,25 +24826,25 @@ function reconcileDeoptChildren(el: Element, children: any, ownerBlock: Block): 
 				moveFocusedNodeBefore(el, want, at, renderingFocus);
 			}
 		}
+		// Focus-preserving moves can rotate surrounding siblings instead of
+		// detaching want. Read its successor only after that movement completes.
+		cursor = getNextSibling(want);
 	}
 }
 
 // Resume point of an owned-children walk after a foreign portal range: the first
 // node AFTER the range close (`end`). Tolerates a torn range (the close was removed
 // out from under us) by resuming right after `start`, so the walk can never loop.
-// Shared by reconcileDeoptChildren's owned-children scan and liveOwnedChildAt.
+// Shared by reconcileDeoptChildren's ownership and ordering walks.
 function nodeAfterPortalRange(start: Node, end: Node): Node | null {
 	let m: Node | null = start;
 	while (m !== null && m !== end) m = getNextSibling(m);
 	return getNextSibling(m ?? start);
 }
 
-// The i-th child of `el` that the de-opt reconciler OWNS, skipping foreign
-// `<!--portal-->…<!--/portal-->` ranges (see reconcileDeoptChildren). Live walk —
-// called per reorder step, only when a foreign range exists.
-function liveOwnedChildAt(el: Element, index: number, adoptHydrationChildren = false): Node | null {
-	let i = 0;
-	let scan: Node | null = getFirstChild(el);
+// Continue an ordering walk past foreign portal ranges and imperative nodes.
+// Hydration may also adopt unmarked server children in this owned host.
+function nextDeoptOwnedChild(scan: Node | null, adoptHydrationChildren: boolean): Node | null {
 	while (scan !== null) {
 		const rangeEnd = (scan as any).$$portalEnd as Node | undefined;
 		if (rangeEnd != null) {
@@ -24225,9 +24859,7 @@ function liveOwnedChildAt(el: Element, index: number, adoptHydrationChildren = f
 			scan = getNextSibling(scan);
 			continue;
 		}
-		if (i === index) return scan;
-		i++;
-		scan = getNextSibling(scan);
+		return scan;
 	}
 	return null;
 }
@@ -24850,6 +25482,31 @@ function teardownChildForSlot(state: ChildSlot): void {
 // the OLD descriptor's children (pre-upgrade), used to key the existing nodes.
 let DEOPT_UPGRADE: { block: Block; children: any } | null = null;
 
+// Only raw-host upgrades need this walk. The retained array structure supplies
+// positional boundaries, while each raw node supplies its accepted descriptor:
+// a deferred leaf's live key/type may already belong to the next Provider value.
+function adoptedDeoptChildren(value: any, cursor: { node: Node | null; end: Node }): any {
+	if (Array.isArray(value)) {
+		// A plain cold-path copy avoids invoking an authored slice/species and
+		// reads indexed accessors only once before preparing the accepted keys.
+		const copy: any[] = [];
+		const length = value.length;
+		for (let index = 0; index < length; index++) {
+			copy[index] = adoptedDeoptChildren(value[index], cursor);
+		}
+		if (POSITIONAL_CHILDREN.has(value)) POSITIONAL_CHILDREN.add(copy);
+		return copy;
+	}
+	if (value == null || value === false || value === true || value === '') return value;
+	const type = typeof value;
+	const element = isElementDescriptor(value);
+	if (!element && type !== 'string' && type !== 'number' && type !== 'bigint') return value;
+	const node = cursor.node;
+	if (node === null || node === cursor.end) return value;
+	cursor.node = node.nextSibling;
+	return element ? (getDeoptDesc(node) ?? value) : value;
+}
+
 // Build the adoption queue for an upgraded element: pair each existing raw
 // child node (strictly between `start` and `end`, in DOM order) with the key
 // its OLD child value carries under the same keying scheme the incoming items
@@ -24864,7 +25521,8 @@ function buildDeoptAdoptQueue(
 	// SAME flatten + keying as the childSlot array path (incl. compound
 	// slot-scoped keys for nested arrays) — the queue's keys must match the
 	// keys the incoming items will get, or nothing adopts.
-	const prepared = prepareDeoptList(oldChildren, true)!;
+	const accepted = adoptedDeoptChildren(oldChildren, { node: start.nextSibling, end });
+	const prepared = prepareDeoptList(accepted, true)!;
 	const { items, keys } = prepared;
 	const queue: Array<{ key: any; node: Node }> = [];
 	let cursor: Node | null = start.nextSibling;
@@ -25310,6 +25968,8 @@ function renderPreparedChildList(
 			env: undefined,
 			adopt: null,
 			plainDeopt: false,
+			mappedNative: undefined,
+			selectionItems: undefined,
 		};
 		if (upgradeArmed) {
 			state.forSlot.adopt = buildDeoptAdoptQueue(upgradeChildren, state.start, state.end!);
@@ -26061,7 +26721,15 @@ export function childSlot(
 			// skips the body outright; changed-context consumers below refresh
 			// lazily. This is what lets a `{children}` passthrough under a
 			// re-rendering Provider skip untouched subtrees without a memo() shim.
-			if (props === state.block.props && tryImplicitBail(state.block)) return;
+			if (
+				props === state.block.props &&
+				// Deferred host shells can change their complete record or children.
+				// Compare the accepted resolution before accepting the shell's identity.
+				(comp !== (hostElementBody as unknown as ComponentBody) ||
+					unchangedScopedHostDescriptor(state.block, props)) &&
+				tryImplicitBail(state.block)
+			)
+				return;
 			if (state.block.props !== props) journalRootProperty(state.block, 'props', state.block.props);
 			state.block.props = props;
 			renderBlock(state.block);
@@ -26603,6 +27271,21 @@ function ctxDirectChanged(block: Block): boolean {
 	return false;
 }
 
+// Shared epoch gate for the two bail paths: while no Provider anywhere has
+// committed a value change since this block's deps were recorded/verified,
+// both version scans are provably clean — skip them without even creating the
+// map iterators. A clean scan re-stamps the block; a changed transitive dep
+// refreshes just its consumers. Returns false when a DIRECT dep changed and
+// the block's own body must re-run (bail refused).
+function ctxBailDepsClean(block: Block): boolean {
+	if (block.$$ctxDepsEpoch !== contextEpochNow()) {
+		if (ctxDirectChanged(block)) return false;
+		if (ctxDepsChanged(block)) refreshContextConsumers(block);
+		else block.$$ctxDepsEpoch = contextEpochNow();
+	}
+	return true;
+}
+
 /**
  * React-style lazy context propagation. A memo boundary bailed on props but a
  * context its subtree consumes changed; rather than re-running the boundary's
@@ -26662,10 +27345,13 @@ function tryMemoBail(block: Block, comp: any, props: any): boolean {
 	const compare = (comp as any).__compare as ((prev: any, next: any) => boolean) | undefined;
 	// React.memo's optional comparator: returns true when props are equal
 	// (→ skip the render). Falls back to a shallow Object.is comparison.
-	const equal = compare ? compare(block.props, props) : shallowEqualProps(block.props, props);
+	const equal = compare
+		? (comp as any)[LAZY_BODY_CHECK] !== undefined
+			? (compare as (prev: any, next: any, scope: Scope) => boolean)(block.props, props, block)
+			: compare(block.props, props)
+		: shallowEqualProps(block.props, props);
 	if (!equal) return false;
-	if (ctxDirectChanged(block)) return false;
-	if (ctxDepsChanged(block)) refreshContextConsumers(block);
+	if (!ctxBailDepsClean(block)) return false;
 	restampCtxDeps(block);
 	reconnectBailedEffects(block);
 	if (typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__)
@@ -26686,8 +27372,9 @@ function tryImplicitBail(block: Block): boolean {
 	// A first attempt that suspended or threw has no committed output to reuse.
 	// Its identity-equal retry must execute until this Block mounts successfully.
 	if (!block.mounted || block.renderStatus !== RENDER_VALID) return false;
-	if (ctxDirectChanged(block)) return false;
-	if (ctxDepsChanged(block)) refreshContextConsumers(block);
+	const checkLazyBody = (block.body as any)[LAZY_BODY_CHECK] as LazyBodyCheck | undefined;
+	if (checkLazyBody !== undefined && !checkLazyBody(block)) return false;
+	if (!ctxBailDepsClean(block)) return false;
 	restampCtxDeps(block);
 	reconnectBailedEffects(block);
 	if (typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__)
@@ -26715,13 +27402,27 @@ function restampCtxDeps(block: Block): void {
 		if (hasReads) {
 			for (const [ctx, v] of reads!) {
 				const cur = m.get(ctx);
-				if (cur === undefined || cur === (ctx as any).$$version) m.set(ctx, v);
+				if (cur !== v) {
+					const live = (ctx as any).$$version;
+					if (cur === undefined || cur === live) {
+						m.set(ctx, v);
+						// A stale version merged in can mask a still-pending consumer
+						// refresh — the receiving map is no longer verifiably current.
+						if (v !== live) b.$$ctxDepsEpoch = -1;
+					}
+				}
 			}
 		}
 		if (hasDirect) {
 			for (const [ctx, v] of direct!) {
 				const cur = m.get(ctx);
-				if (cur === undefined || cur === (ctx as any).$$version) m.set(ctx, v);
+				if (cur !== v) {
+					const live = (ctx as any).$$version;
+					if (cur === undefined || cur === live) {
+						m.set(ctx, v);
+						if (v !== live) b.$$ctxDepsEpoch = -1;
+					}
+				}
 			}
 		}
 	}
@@ -26771,7 +27472,12 @@ function restampCachedSlotContext(slot: any): void {
 }
 
 function refreshBlockForContext(block: Block): void {
-	if (ctxDirectChanged(block)) {
+	// A block whose dep maps were verified at the current context epoch holds no
+	// stale entry: its own direct read cannot have changed, and for a memo/armed
+	// block no DESCENDANT dep changed either. Non-memo intermediates carry no
+	// $$ctxReads aggregate, so they still descend to find unstamped consumers.
+	const verified = block.$$ctxDepsEpoch === contextEpochNow();
+	if (!verified && ctxDirectChanged(block)) {
 		// This child directly consumes the changed context (or shares its block
 		// with a lite descendant that does): re-run it. renderBlock re-renders its
 		// own subtree top-down, so nested consumers below it are reached normally.
@@ -26781,11 +27487,18 @@ function refreshBlockForContext(block: Block): void {
 	} else if ((block.body as any)?.__memo === true || block.$$implicitBail === true) {
 		// A memo'd (or implicit-bail-armed) pure indirection: its $$ctxReads is
 		// stamped, so prune to subtrees that actually hold a changed-context consumer.
-		if (ctxDepsChanged(block)) refreshContextConsumers(block);
+		// A clean scan re-stamps it — direct was already verified above — so a
+		// re-reach inside the same epoch prunes without rescanning.
+		if (!verified) {
+			if (ctxDepsChanged(block)) refreshContextConsumers(block);
+			else block.$$ctxDepsEpoch = contextEpochNow();
+		}
 	} else {
 		// A non-memo intermediate (control-flow branch, plain wrapper) isn't stamped
 		// in $$ctxReads, so we can't prune — descend unconditionally to find any
-		// consumer it strands. Bounded by this bailed boundary's subtree.
+		// consumer it strands. Bounded by this bailed boundary's subtree. Its own
+		// direct map was verified above, so the stamp can only prune a re-check.
+		if (!verified) block.$$ctxDepsEpoch = contextEpochNow();
 		refreshContextConsumers(block);
 	}
 }
@@ -26815,7 +27528,7 @@ export function compilerCacheContext(
 	previous: number | undefined,
 	restampMemoAncestors: boolean = false,
 ): number {
-	const current = COMPILER_CACHE_CONTEXT_EPOCH;
+	const current = contextEpochNow();
 	if (previous === undefined) return current;
 	const reconnect = EFFECT_RECONNECT_CONTEXT !== null;
 	const restamp = restampMemoAncestors && scope.block.memoInChain;
@@ -26980,7 +27693,18 @@ export function memo<P>(
 	Object.defineProperty(memoWrapper, 'defaultProps', MEMO_DEFAULT_PROPS_DESCRIPTOR);
 	if (typeof __OCTANE_PROFILE_ENABLED__ !== 'undefined' && __OCTANE_PROFILE_ENABLED__)
 		__profileComponentSource(memoWrapper, component);
-	if (arePropsEqual) Object.defineProperty(memoWrapper, '__compare', { value: arePropsEqual });
+	const checkLazyBody = (component as any)[LAZY_BODY_CHECK] as LazyBodyCheck | undefined;
+	if (checkLazyBody !== undefined) {
+		markLazyBodyCheck(memoWrapper, checkLazyBody);
+		// Even the default comparator must remain explicit for this family: a
+		// compiler memo witness may otherwise skip the slot before its body check.
+		Object.defineProperty(memoWrapper, '__compare', {
+			value: (prev: any, next: any, scope: Scope): boolean =>
+				checkLazyBody(scope) &&
+				(arePropsEqual ? arePropsEqual(prev, next) : shallowEqualProps(prev, next)),
+		});
+	} else if (arePropsEqual)
+		Object.defineProperty(memoWrapper, '__compare', { value: arePropsEqual });
 	return memoWrapper as ComponentBody<P> & {
 		readonly type: ComponentBody<P>;
 		displayName?: string;
@@ -27899,6 +28623,7 @@ export function errorBlock(
 
 	if (state.block !== null) {
 		const previous = state.block;
+		if (stageErrorReset(state, switchErrorToCatch)) return state.reset;
 		state.block = null;
 		unmountBlock(previous);
 		if (state.parentBlock.disposed || state.block !== null) return state.reset;
@@ -27971,6 +28696,65 @@ export function errorBlock(
 		if (previousNative !== undefined) setNativeAdoptionResolver(previousNative);
 	}
 	return state.reset;
+}
+
+// Both imported and dynamic ErrorBoundary forms retain their committed catch
+// arm until a suspending retry can replace it. The optional driver keeps this
+// cold path out of applications that never use Suspense or transitions.
+function stageErrorReset<T extends TrySlot | ErrorSlot>(
+	state: T,
+	catchError: (state: T, error: unknown, reportInline?: boolean) => void,
+): boolean {
+	const previous = state.block;
+	const swapDriver = TRANSITION_SWAP_DRIVER;
+	if (
+		previous === null ||
+		!previous.mounted ||
+		swapDriver === null ||
+		activeHydration() !== null ||
+		!preservesCommittedSuspense(state.parentBlock)
+	)
+		return false;
+	if (ROOT_RENDER_TRANSACTION !== null)
+		journalRootSlot(state, state.domParent, state.start, state.end);
+	const retry: ComponentBody = (props, scope) => {
+		scope.block.idState = state.idState;
+		return state.tryBody(props, scope, state.env);
+	};
+	const result = swapDriver.render(
+		state.parentBlock,
+		state.domParent,
+		previous.endMarker ?? state.start,
+		retry,
+		undefined,
+		null,
+		'control-flow',
+		state.env,
+	);
+	if (result.suspended !== null || result.failed) {
+		swapDriver.dispose(result.wip);
+		if (result.suspended !== null) throw new SuspenseException(result.suspended);
+		if (isHostContextRequest(result.error) || result.error instanceof NativeAdoptionMiss)
+			throw result.error;
+		catchError(state, result.error, true);
+		return true;
+	}
+	const body = result.wip.block;
+	body.body = state.tryBody;
+	(body as any).$$tryHandler = (error: unknown) => {
+		catchError(state, error);
+		return state.block;
+	};
+	if (state.__kind === 'trySlotSlot') {
+		state.tryBlock = body;
+		(body as any).__trySlot = state;
+	}
+	state.block = body;
+	state.hasResolved = true;
+	setTryBranch(state, 1);
+	swapDriver.splice(result.wip);
+	unmountBlock(previous);
+	return true;
 }
 
 function switchErrorToCatch(
@@ -28161,6 +28945,12 @@ export function tryBlock(
 		state.catchBody = catchBody;
 		state.pendingBody = pendingBody;
 		state.propagateSuspense = propagateSuspense;
+		// The boundary's own hold must keep these candidate inputs for retry.
+		// A whole-origin unwind instead restores its driving cells; restore the
+		// matching environment before a queued descendant can retry this primary,
+		// rather than waiting for the origin's later pending-cue render to do it.
+		if (ACTIVE_TRANSITION_ATTEMPT !== null && state.env !== env)
+			TRANSITION_JOURNAL!.push(JOURNAL_PROP, state, 'env', state.env);
 		state.env = env;
 	}
 	const s = state;
@@ -28566,6 +29356,8 @@ function renderInitialSuspenseHydration(state: TrySlot, initial: InitialSuspense
 }
 
 function mountTry(state: TrySlot): void {
+	if (state.propagateSuspense && state.branch === -1 && stageErrorReset(state, switchToCatch))
+		return;
 	cancelSuspenseRetry(state);
 	HIDDEN_REVEAL_ACTIONS?.delete(state);
 	const wasPending = state.branch === 2;
@@ -30729,17 +31521,22 @@ function hasHeldDeferredSwap(slot: DeferredSlot<unknown>): boolean {
 	return false;
 }
 
-export function useDeferredValue<T>(value: T, ...rest: any[]): T {
+export function useDeferredValue<T>(value: T, ...rest: any[]): T;
+export function useDeferredValue<T>(
+	value: T,
+	initialValueOrSlot: T | HookSlot | undefined = undefined,
+	lastSlot?: HookSlot,
+): T {
 	// React-19 shape: `useDeferredValue(value, initialValue?)`. The compiler
-	// appends the hook slot as the LAST argument, so we detect the
-	// user-vs-compiler args by counting from the end. One trailing slot →
-	// user passed no initialValue; one slot preceded by another
-	// arg → user passed initialValue. Same hook-slot semantics either way.
-	let slot = rest[rest.length - 1] as HookSlot | undefined;
+	// appends the hook slot last. Argument count distinguishes an authored
+	// initialValue (even undefined or a symbol) from the compiler slot.
+	const count = arguments.length;
+	let slot = (count > 3 ? arguments[count - 1] : count === 3 ? lastSlot : initialValueOrSlot) as
+		HookSlot | undefined;
 	slot = resolveSlot(slot);
 	if (slot === undefined) missingSlot('useDeferredValue');
-	const initialValue = rest.length >= 2 ? (rest[0] as T) : undefined;
-	const hasInitial = rest.length >= 2;
+	const hasInitial = count >= 3;
+	const initialValue = hasInitial ? (initialValueOrSlot as T) : undefined;
 	const scope = CURRENT_SCOPE!;
 	const block = CURRENT_BLOCK!;
 	const hidden = inInactiveSubtree(block);
@@ -31757,9 +32554,9 @@ export function ifBlock(
 	// Hoisted-helper env tuple (compiled-output Phase 2) — see renderBranchSlot.
 	env?: any[],
 ): void {
-	const hydration = activeHydration();
 	let state = parentScope.slots[slotKey] as IfSlot | undefined;
 	if (state === undefined) {
+		const hydration = activeHydration();
 		let start: Comment | null = null;
 		let end: Node | null = null;
 		const passthrough = hydration?.passthroughRanges === true;
@@ -32665,9 +33462,9 @@ export function switchBlock(
 	// Hoisted-helper env tuple (compiled-output Phase 2) — see renderBranchSlot.
 	env?: any[],
 ): void {
-	const hydration = activeHydration();
 	let state = parentScope.slots[slotKey] as SwitchSlot | undefined;
 	if (state === undefined) {
+		const hydration = activeHydration();
 		let start: Comment | null = null;
 		let end: Node | null = null;
 		const passthrough = hydration?.passthroughRanges === true;
@@ -32742,9 +33539,10 @@ interface ForSlot {
 	// focus, input state survive — React parity) instead of rebuilding.
 	// Consumed and nulled within the same render.
 	adopt: Array<{ key: any; node: Node }> | null;
-	// Present only on a childSlot owned by the compiler's guarded map ABI.
+	// Set only on a childSlot owned by the compiler's guarded map ABI.
 	// Keeps descriptor↔compiled adoption off every ordinary descriptor list.
-	mappedNative?: boolean;
+	// Undefined means the arm has not been selected; false is a selected fallback.
+	mappedNative: boolean | undefined;
 	// True when this de-opt list's items render through the plain `deoptItemBody`
 	// — no compiled map body, no mapped fallback wrapper. `mountItem` needs the
 	// fact but must NOT name `deoptItemBody` to get it: a live identity
@@ -32757,9 +33555,9 @@ interface ForSlot {
 	// one hidden class; only childSlot ever stamps or reads it, because only
 	// childSlot passes mountItem the de-opt sentinel.
 	plainDeopt: boolean;
-	// Present only when the compiler proved a keyed equality selection. Identity
+	// Set only when the compiler proved a keyed equality selection. Identity
 	// gates the two-row update without retaining extra state on ordinary lists.
-	selectionItems?: ArrayLike<any>;
+	selectionItems: ArrayLike<any> | undefined;
 }
 
 export function forBlock<T>(
@@ -32848,6 +33646,8 @@ export function forBlock<T>(
 			// sentinel — but both ForSlot literals declare it so every slot shares
 			// one hidden class and the stamp in childSlot transitions nothing.
 			plainDeopt: false,
+			mappedNative: undefined,
+			selectionItems: undefined,
 		};
 		parentScope.slots[slotKey] = state;
 		registerSlot(parentScope, state);
@@ -33579,8 +34379,10 @@ function updateSurvivor<T>(
 		block.itemIndex = newIdx;
 		block.body = itemBody as ComponentBody;
 	} else {
-		if (journal && block.props !== newItem) journalRootProperty(block, 'props', block.props);
-		if (journal && block.extra !== env) journalRootProperty(block, 'extra', block.extra);
+		// Item and captured inputs change together before the body can run. One
+		// entry restores both without a second property key or journal guard.
+		if (journal && (block.props !== newItem || block.extra !== env))
+			TRANSITION_JOURNAL!.push(JOURNAL_INPUTS, block, block.props, block.extra);
 		block.props = newItem;
 		block.body = itemBody as ComponentBody;
 		block.itemIndex = newIdx;
@@ -33593,11 +34395,6 @@ function updateSurvivor<T>(
 			renderBlock(block);
 		}
 	}
-}
-
-function consumeAdoptQueuePrefix(adopt: Array<{ key: any; node: Node }>, count: number): void {
-	if (count < adopt.length) adopt.copyWithin(0, count);
-	adopt.length -= count;
 }
 
 type ListKeySource<T> = readonly any[] | ((item: T, index: number) => any);
@@ -33673,14 +34470,20 @@ function mountItemsLinear<T>(
 	const oldItems = state.items;
 	const parentNode = state.end.parentNode!;
 	// Pure-host → blocks upgrade adoption (childSlot arms `state.adopt`): the
-	// element's existing raw children, keyed like the incoming items. An item
-	// whose key matches the queue FRONT adopts that node in place (mountItem
-	// wraps it in the item's markers and seeds block.deoptNode); other items
-	// mount fresh BEFORE the next unconsumed node so DOM order tracks list
-	// order. Non-front key matches (a reorder in the very same render) mount
-	// fresh — the unconsumed nodes are swept by the caller.
+	// element's existing raw children, keyed like the incoming items. This cold
+	// map preserves later survivors after a removed/changed key, and reorders
+	// adopted nodes without remounting their DOM state. Ordinary fills allocate
+	// no adoption map. Keep the original queue intact until every item succeeds.
 	const adopt = state.adopt;
-	let adoptIndex = 0;
+	let adoptByKey: Map<any, { key: any; node: Node }> | null = null;
+	let adoptedNodes: Set<Node> | null = null;
+	if (adopt !== null) {
+		adoptByKey = new Map();
+		for (let index = 0; index < adopt.length; index++) {
+			const entry = adopt[index];
+			if (!adoptByKey.has(entry.key)) adoptByKey.set(entry.key, entry);
+		}
+	}
 	let prev: Block | null = null;
 	try {
 		for (let i = 0; i < newLen; i++) {
@@ -33688,13 +34491,19 @@ function mountItemsLinear<T>(
 			const key = readListKey(keySource, item, i, normalizeKey);
 			let adoptNode: Node | null = null;
 			let anchor: Node = state.end;
-			if (adopt !== null && adoptIndex < adopt.length) {
-				const candidate = adopt[adoptIndex];
-				if (candidate.key === key) {
+			if (adoptByKey !== null) {
+				anchor = (prev === null ? state.start!.nextSibling : prev.endMarker!.nextSibling)!;
+				const candidate = adoptByKey.get(key);
+				if (candidate !== undefined) {
 					adoptNode = candidate.node;
-					adoptIndex++;
-				} else {
-					anchor = candidate.node;
+					adoptByKey.delete(key);
+					(adoptedNodes ??= new Set()).add(adoptNode);
+					if (adoptNode !== anchor) {
+						if (renderingFocus !== null) {
+							captureFocusedMovement(parentNode, renderingFocus);
+							moveFocusedNodeBefore(parentNode, adoptNode, anchor, renderingFocus);
+						} else parentNode.insertBefore(adoptNode, anchor);
+					}
 				}
 			}
 			const block = mountItem(
@@ -33740,9 +34549,14 @@ function mountItemsLinear<T>(
 		state.size = 0;
 		throw error;
 	}
-	// Adoption consumes only a queue prefix. Compact it once after the pass
-	// instead of shifting every adopted node and repeatedly reindexing the tail.
-	if (adoptIndex !== 0) consumeAdoptQueuePrefix(adopt!, adoptIndex);
+	if (adoptByKey !== null) {
+		let remaining = 0;
+		for (let index = 0; index < adopt!.length; index++) {
+			const entry = adopt![index];
+			if (!adoptedNodes?.has(entry.node)) adopt![remaining++] = entry;
+		}
+		adopt!.length = remaining;
+	}
 }
 
 function reconcileKeyed<T>(
@@ -33916,7 +34730,7 @@ function reconcileKeyed<T>(
 
 	// ── General case: both middles non-empty. Partition + LIS-move.
 	const newMidLen = newEnd - prefixLen + 1;
-	const newKeys: any[] = new Array(newMidLen);
+	const newKeys: any[] = [];
 	const newKeysToIdx = new Map<any, number>(); // key → MIDDLE-RELATIVE index (0..newMidLen-1)
 	for (let i = 0; i < newMidLen; i++) {
 		const key = readListKey(keySource, items[prefixLen + i], prefixLen + i, normalizeKey);
@@ -34584,8 +35398,7 @@ function mountItem<T>(
 			// Upgrade adoption on the self-marked path: the adopted raw node IS
 			// the item's single element, already in position — no markers, no
 			// insert. Seed it as both markers AND the block's deoptNode so the
-			// body's raw path patches it in place (the queue only pairs
-			// tag-compatible nodes, so the reuse branch always hits).
+			// body's raw path can reuse a matching tag or replace a changed tag.
 			const block = createBlock(
 				'control-flow',
 				parentBlock,
@@ -35746,6 +36559,17 @@ function makeRoot(
 		mode?: 'urgent' | 'transition',
 	): void => {
 		if (unmounted) return;
+		// Root render entry can carry contexts bumped outside provideContext —
+		// react-hosted mirrors publish version bumps between React commits, then
+		// commit through root.render → this path. Advance the shared epoch so the
+		// $$ctxDepsEpoch fast path can never mask those stale recorded versions.
+		// ponytail: process-global catch-all — every root.render stales all stamps
+		// and defeats compilerCacheContext's previous===current guard for one
+		// rescan cycle, even with no context change (react islands pay it per
+		// commit). Upgrade: bump at the publish site (react/index.ts) so the
+		// epoch tracks only real bumps; kept here because src/react is out of
+		// scope and the catch-all also covers unknown external bumpers.
+		bumpContextEpoch();
 		// Same component as the live root (incl. a just-hydrated root): update
 		// props in place and schedule. This is a NORMAL client render — `hydrating`
 		// is already false, so renderBlock reuses the adopted DOM, not rebuilds it.
