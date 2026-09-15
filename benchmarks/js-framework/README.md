@@ -177,15 +177,18 @@ The opt-in `nested` mode uses three independent 1,000-row descriptor lists throu
 the same compiled `.tsrx` child hole. One list is wrapped in a same-kind array
 with a top-level sibling, giving its implicit leaves a real nested path; the
 second stays flat as a no-work control. A third uses the nested shape with every
-row explicitly keyed, checking that an implicit prefix is never prepared for
-fully keyed siblings. Each also contains a separate explicit key `"0"`; in the
+row explicitly keyed, measuring whether its siblings reuse one wrapper prefix.
+Each also contains a separate explicit key `"0"`; in the
 first two modes it sits beside implicit index zero. An unrelated update uses a
 different, prebuilt descriptor generation, so descriptor construction is outside timing.
 The gate checks order, complete inner HTML, survivor DOM identity, typed
-uncontrolled inputs, and focus. A `JSON.stringify` observer installed before
+uncontrolled inputs, and focus. It also reverses and restores the fully keyed
+siblings, checking exact survivor identity and order through both operations.
+A `JSON.stringify` observer installed before
 the production module loads reports calls for nested implicit identities,
-nested explicit keys, and any shared wrapper-path serialization. Observation
-finishes in a separate browser context before the clean timing run.
+full nested explicit tuples, individual explicit key JSON escaping, and shared
+wrapper-path serialization. Observation finishes in a separate browser context
+before the clean timing run.
 
 From the repository root, build the separate fixture while the runtime is at
 the baseline revision. This uses the normal minified production build:
@@ -199,19 +202,42 @@ cd benchmarks/js-framework/octane-tsrx
 From a second terminal at the repository root, record the baseline:
 
 ```bash
-WORK_MODE=nested WORK_EXPECT_NESTED_JSON=1000 WORK_EXPECT_PATH_JSON=0 TARGET_URL=http://127.0.0.1:5317/nested-work.html WORK_JSON=/tmp/nested-baseline.json node benchmarks/js-framework/style-work.mjs 30
+WORK_MODE=nested WORK_EXPECT_NESTED_JSON=0 WORK_EXPECT_PATH_JSON=1 WORK_EXPECT_MIXED_EXPLICIT_TUPLES=1 WORK_EXPECT_MIXED_EXPLICIT_VALUES=0 WORK_EXPECT_EXPLICIT_TUPLES=1001 WORK_EXPECT_EXPLICIT_VALUES=0 WORK_EXPECT_EXPLICIT_PATH=0 TARGET_URL=http://127.0.0.1:5317/nested-work.html WORK_JSON=/tmp/nested-baseline.json node benchmarks/js-framework/style-work.mjs 30
 ```
 
 After a runtime change, build with `--outDir dist/nested-work-candidate`, serve
 that directory on port 5318, and run the same command with
 `WORK_EXPECT_NESTED_JSON=0`, `WORK_EXPECT_PATH_JSON=1`, `TARGET_URL=http://127.0.0.1:5318/nested-work.html`,
-and `WORK_EXPECTED_HTML_SHA` set to the baseline output's `htmlSha`. Keep both
-built bundles and servers fixed; repeat the identical runner in A–B–B–A order
+`WORK_EXPECT_EXPLICIT_TUPLES=0`, `WORK_EXPECT_EXPLICIT_VALUES=1001`,
+`WORK_EXPECT_EXPLICIT_PATH=1`, `WORK_EXPECT_MIXED_EXPLICIT_TUPLES=0`,
+`WORK_EXPECT_MIXED_EXPLICIT_VALUES=1`, and `WORK_EXPECTED_HTML_SHA` set to the
+baseline output's `htmlSha`. Keep both built bundles and servers fixed; repeat
+the identical runner in A–B–B–A order
 for timing comparisons. Each of 30 samples measures eight toggled updates,
-dividing the elapsed time by eight. The flat and fully explicit lists measure
-how much general browser load changes between runs. Absolute timing differences inside this
-control's variation are inconclusive; the untimed JSON call counts and
-observable state are deterministic gates.
+dividing the elapsed time by eight. The flat and mostly implicit nested lists
+measure browser load and any cost shifted to the existing implicit path. Timing
+differences within the control variation are inconclusive; the JSON call counts
+and observable state are deterministic gates.
+
+On 2026-09-12 (Darwin arm64, Node 26.4.0), the frozen baseline and candidate
+production bundles passed the same HTML, DOM identity, input, focus, and reorder
+checks (`htmlSha` `64dd26ca…9427d92ed1650`). Per update, the fully keyed list
+changed from 1,001 full tuple JSON calls to one wrapper-path JSON call and 1,001
+scalar key JSON calls. The implicit list retained one path JSON call and no
+implicit tuple calls; the flat list made none. Bundle JS grew from 166,305 to
+166,409 bytes (+104); `gzip -n` grew from 53,557 to 53,586 bytes (+29).
+
+| Run | Fully keyed median / p95 (ms) | Nested implicit median / p95 (ms) | Flat median / p95 (ms) |
+| --- | ---: | ---: | ---: |
+| Baseline A1 | 0.550 / 0.575 | 0.550 / 0.575 | 0.500 / 0.550 |
+| Candidate B1 | 0.5625 / 0.6000 | 0.5500 / 0.6000 | 0.5125 / 0.5500 |
+| Candidate B2 | 0.5750 / 0.6125 | 0.5625 / 0.6000 | 0.5125 / 0.5500 |
+| Baseline A2 | 0.5500 / 0.6000 | 0.5375 / 0.5875 | 0.5000 / 0.5250 |
+
+The fully keyed median divided by the flat control was 1.10/1.10 for A1/A2
+and 1.10/1.12 for B1/B2. This fixture establishes less repeated wrapper-path
+serialization, but its timings do not establish a latency gain. These timings
+are environment-specific, and each row uses 30 samples of eight updates.
 
 ### List key callback work (opt-in)
 
@@ -320,6 +346,68 @@ counts are not a heap-allocation measurement. Ordinary component `@for` output
 was unchanged in all four modes. Rebuilding the production work gate after the
 compiler correction reproduced the exact candidate bundle and readable-source
 checksums above, so its recorded work and timing evidence remains applicable.
+
+### Leading inline style spreads (opt-in)
+
+The `literals` mode includes two imported runtime style objects followed by
+`fontWeight` and `color` expressions. `leadingSpread` exercises that inline
+literal; `leadingGeneric` evaluates the same object as an ordinary style value.
+`collisionSpread` and `collisionGeneric` add a prefix `color` key, checking the
+fallback that preserves the key's original insertion position. All four cases
+verify complete CSS declarations, labels, selection, and surviving DOM nodes on
+mount, one-row selection, two-row selection changes, and unrelated updates.
+
+The optimized literal still snapshots and diffs its spread prefix. Only the
+fixed suffix uses scalar comparisons and direct setters after mount. A prefix
+collision keeps the complete object diff. Chromium precise coverage counts
+previous/current object-diff property visits and setter calls separately from
+CSSOM writes. These counts establish work removed from the generic diff, not
+heap allocation counts or browser layout savings. Full-object mount and
+collision fallback can do more object construction than the generic control.
+
+Freeze readable production builds from each compiler revision before measuring:
+
+```bash
+cd benchmarks/js-framework/octane-tsrx-naive
+node ../../../node_modules/vite/bin/vite.js build --config vite.style-literals.config.js --outDir dist/style-literals-baseline
+node ../../../node_modules/vite/bin/vite.js preview --config vite.style-literals.config.js --outDir dist/style-literals-baseline --host 127.0.0.1 --port 5333 --strictPort
+```
+
+Build the candidate into `dist/style-literals-candidate`, then serve it on 5334.
+Run the gates from the repository root; change the URL and remove
+`WORK_EXPECT_SPREADS_OPTIMIZED=0` for the candidate:
+
+```bash
+WORK_CASES=leadingSpread,leadingGeneric,collisionSpread,collisionGeneric WORK_EXPECT_SPREADS_OPTIMIZED=0 TARGET_URL=http://127.0.0.1:5333/style-literals.html WORK_JSON=/tmp/style-spreads-baseline.json node benchmarks/js-framework/style-literals-work.mjs
+```
+
+The baseline switch changes only expected work, never the fixtures. The expected
+candidate reduces both old-key and new-key scans from 4,000 to 2,000 per update
+in `leadingSpread`; its two suffix setters run only for changed rows. Both
+generic controls and the collision fallback retain 4,000 scans in each direction.
+CSSOM writes remain identical in all cases: 4,000 on mount, two or four for
+selection, and zero for an unrelated update.
+
+For timing, build each revision again with `--minify esbuild` and a separate
+output directory, then serve those artifacts on separate ports. Set
+`WORK_SAMPLES=30` and `WORK_TIMING_URL` to the corresponding minified URL while
+`TARGET_URL` stays on the readable artifact used for work coverage. Timing uses
+a separate browser without coverage or CSSOM instrumentation, two warmup trials,
+and a fresh context for each sample. This measures mounting and the first update,
+not a warmed long-running application's steady-state throughput. Keep artifacts
+fixed, run A–B–B–A without concurrent tests, and compare the generic controls
+before claiming a timing benefit. Omit `WORK_CASES` to retain the original literal
+and duplicate-key gates as well.
+
+For a bounded comparison with closer controls, alternate baseline/candidate URLs
+within each sample and rotate the four modes each round. Both artifacts must
+pass the same post-timer CSS and DOM assertions. `pairedMedianRatio` is the
+median candidate/baseline ratio of those adjacent samples;
+`controlAdjustedMedianRatio` divides each pair by its same-round generic control:
+
+```bash
+WORK_CASES=leadingSpread,leadingGeneric,collisionSpread,collisionGeneric WORK_TIMING_OPERATIONS=select_another,unrelated_update WORK_SAMPLES=15 TARGET_URL=http://127.0.0.1:5334/style-literals.html WORK_TIMING_URL=http://127.0.0.1:5336/style-literals.html WORK_TIMING_BASELINE_URL=http://127.0.0.1:5335/style-literals.html WORK_JSON=/tmp/style-spreads-paired.json node benchmarks/js-framework/style-literals-work.mjs
+```
 
 ## Keyed-reorder matrix (`run-reorder.mjs`)
 
