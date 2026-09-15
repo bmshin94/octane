@@ -128,6 +128,13 @@ overrides:
   '@solid-primitives/event-listener>solid-js': '1.9.14'
   '@solid-primitives/keyboard>solid-js': '1.9.14'
   '@solid-primitives/resize-observer>solid-js': '1.9.14'
+  # Pinned framer-motion 13.2.0 evidence includes the dependency set it shipped
+  # with. Its own ^13.2.0/^13.0.0 ranges would otherwise float motion-dom and
+  # motion-utils to 13.3.x, whose MotionValue internals diverged from the
+  # pinned upstream source and contract types the pristine lanes execute.
+  'framer-motion@13.2.0>motion-dom': '13.2.0'
+  'framer-motion@13.2.0>motion-utils': '13.0.0'
+  'motion-dom@13.2.0>motion-utils': '13.0.0'
 
 # Rspeedy exposes Rsbuild/Rspack-backed plugin state but does not declare
 # @rspack/core itself. Make the audited Lynx instance explicit so a newer
