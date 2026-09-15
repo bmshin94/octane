@@ -1191,6 +1191,9 @@ const HOOK_MEMO_RUNTIME_HELPERS = new Set([
 	'memoPublishAlways',
 ]);
 const NATIVE_READ_RUNTIME_HELPERS = new Set([
+	'nativeStyleBinding',
+	'readNativeDomStyle',
+	'readNativeDomProps',
 	'enableNativeReadCollection',
 	'beginNativeReadScope',
 	'endNativeReadScope',
@@ -4482,6 +4485,7 @@ function containsAutoMemoContextRead(root, ctx) {
 		}
 		if (seen.has(node)) return;
 		seen.add(node);
+
 		if (
 			node.type === 'ArrowFunctionExpression' ||
 			node.type === 'FunctionExpression' ||
@@ -6378,6 +6382,24 @@ function containsAutoMemoUnsafeStructure(stmts, ctx = null) {
 			// that child's render. Keep mutable ref reads opaque even though ordinary
 			// event-handler calls/mutations remain deferred.
 			if (containsDeferredRefRead(n)) found = true;
+			return;
+		}
+		// A native style binding performs implicit reads in its own scheduled Block.
+		// Equal props cannot prove its subtree complete during a boundary retry;
+		// those reads are outside the parent call's automatic memo witness.
+		if (
+			ctx?.nativeReads &&
+			n.type === 'JSXOpeningElement' &&
+			n.name?.type === 'JSXIdentifier' &&
+			/^[a-z]/.test(n.name.name) &&
+			n.attributes.some((attribute) => {
+				if (attribute.name?.name !== 'style' || attribute.value?.type !== 'JSXExpressionContainer')
+					return false;
+				const value = unwrapTsExpr(attribute.value.expression);
+				return value.type !== 'ObjectExpression' || !objectExprIsStaticLiteral(value);
+			})
+		) {
+			found = true;
 			return;
 		}
 		if (
@@ -12331,6 +12353,8 @@ function ssrEmitElement(node, ctx, name, inlinedSubs, parentNs, cssHash, compone
 			flush();
 			ctx.runtimeNeeded.add('ssrStyle');
 			registerAttrLoweringOrigin(ctx, attr.name, 'ssrStyle', null);
+			if (ctx.nativeReads)
+				inner = b.call(requireRuntimeForContext(ctx, 'readNativeDomStyle'), inner);
 			parts.push(
 				ssrCall(
 					'ssrStyle',
@@ -12473,6 +12497,7 @@ function ssrEmitElement(node, ctx, name, inlinedSubs, parentNs, cssHash, compone
 				b.literal(tag, JSON.stringify(tag)),
 				b.literal(selfNs, JSON.stringify(selfNs)),
 				b.literal(resolveFormControlsAcrossSpreads),
+				...(ctx.nativeReads ? [b.id(requireRuntimeForContext(ctx, 'readNativeDomStyle'))] : []),
 			],
 			node,
 		);
@@ -20251,7 +20276,21 @@ function jsxElementToCreateElement(node, ctx, eagerRoot = false) {
 			);
 		}
 	}
-	const propsNode = inheritOriginLoc(b.object(properties), node);
+	const propsObject = inheritOriginLoc(b.object(properties), node);
+	const propsNode =
+		ctx.nativeReads &&
+		!componentTag &&
+		attrs.some(
+			(attr) =>
+				attr.type === 'SpreadAttribute' ||
+				attr.type === 'JSXSpreadAttribute' ||
+				(attr.name?.name ?? attr.name) === 'style',
+		)
+			? inheritOriginLoc(
+					b.call(requireRuntimeForContext(ctx, 'readNativeDomProps'), propsObject),
+					node,
+				)
+			: propsObject;
 	const childrenNeedRenderScope = jsxValueChildrenNeedRenderScope(node);
 	const eagerProviderChildren =
 		eagerRoot &&
@@ -23123,6 +23162,7 @@ function planJsx(
 		if (b.kind === 'formCommit') ctx.runtimeNeeded.add('setFormControlSources');
 		if (b.kind === 'hostCommit') {
 			ctx.runtimeNeeded.add('setHostPropSources');
+			if (ctx.nativeReads) b.readStyle = requireRuntimeForContext(ctx, 'readNativeDomStyle');
 			ctx.runtimeNeeded.add('queueOwnRefDetach');
 		}
 		// A commit-phase collector takes the element's props as one grouped call,
@@ -23156,6 +23196,9 @@ function planJsx(
 		if (b.kind === 'styleProperties') {
 			ctx.runtimeNeeded.add('setStyleProperty');
 			ctx.runtimeNeeded.add(b.spread ? 'canSplitStyleProperties' : 'isHydratingStyle');
+		}
+		if (b.kind === 'nativeStyle') {
+			b.helper = requireRuntimeForContext(ctx, 'nativeStyleBinding');
 		}
 		if (b.kind === 'spread') {
 			ctx.runtimeNeeded.add('setSpread');
@@ -24626,6 +24669,20 @@ function emitBindingMount(bind, elVar, bag) {
 		return st(b.stmt(b.call('_$queueFormAuthoringDiagnostic', ...args)));
 	}
 	switch (bind.kind) {
+		case 'nativeStyle': {
+			return st(
+				b.block([
+					...mountHost(),
+					b.stmt(
+						b.assignment(
+							'=',
+							local(`_native$${bind.id}`),
+							b.call(bind.helper, b.id('__s'), undefinedNode(), el(), bind.expr),
+						),
+					),
+				]),
+			);
+		}
 		case 'textOnlyChild': {
 			// Only compiler-admitted native placeholders may be reused. An old
 			// two-argument caller or an excluded custom/template host must retain
@@ -24724,6 +24781,7 @@ function emitBindingMount(bind, elVar, bag) {
 								undefinedNode(),
 								b.id('__s'),
 								b.literal(bind.hasNestedChildren === true),
+								...(bind.readStyle ? [b.id(bind.readStyle)] : []),
 							),
 						),
 					),
@@ -25002,6 +25060,9 @@ function emitBindingUpdate(bind, bag, inlineBindingGuards = false) {
 		attrLoweringToken(b.id(`_$${attrBindingUpdateHelper(bind, inlineBindingGuards)}`), bind);
 	const nameLit = () => attrLoweringToken(b.literal(bind.name), bind);
 	switch (bind.kind) {
+		case 'nativeStyle': {
+			return st(b.stmt(b.call(bind.helper, b.id('__s'), F('_native'), F('_el'), bind.expr)));
+		}
 		case 'nativeChangeRuntime': {
 			return st(b.stmt(b.call('_$queueNativeChangeDiagnostic', F('_el'))));
 		}
@@ -25083,6 +25144,7 @@ function emitBindingUpdate(bind, bag, inlineBindingGuards = false) {
 							F('_host'),
 							b.id('__s'),
 							b.literal(bind.hasNestedChildren === true),
+							...(bind.readStyle ? [b.id(bind.readStyle)] : []),
 						),
 					),
 				),
@@ -26491,6 +26553,20 @@ function emitElementHtml(
 			if (!isAfterSpread && inner.type === 'Literal' && typeof inner.value === 'string') {
 				const chunk = ` style="${escapeAttr(inner.value)}"`;
 				appendBakedAttribute(attrTemplate, chunk, attrName, attr.name, inner, ctx.inspect);
+				continue;
+			}
+			if (
+				ctx.nativeReads &&
+				(inner.type !== 'ObjectExpression' || !objectExprIsStaticLiteral(inner))
+			) {
+				bindings.push({
+					id: bindings.length,
+					kind: 'nativeStyle',
+					expr: tsrxExprNode(inner, ctx, componentName, inlinedSubs),
+					path,
+					ns: hostNs,
+					nameOrigin: attr.name,
+				});
 				continue;
 			}
 			if (
