@@ -373,12 +373,19 @@ function packageTestExecutionPlan(node, workspaceRoot) {
 			'Package test script must run Vitest, Jest, node --test, or the repository parity command',
 		);
 	}
-	const testFiles = discoverPackageTests(packageDirectory).map((filePath) =>
-		realpathSync(filePath),
-	);
-	const reportEligibleTestFiles = discoverReportEligiblePackageTests(packageDirectory).map(
-		(filePath) => realpathSync(filePath),
-	);
+	// Materialized upstream test trees are regenerated in place, so a discovered
+	// file can be removed before it is resolved; treat a vanished file as absent.
+	const resolveIfPresent = (filePath) => {
+		try {
+			return [realpathSync(filePath)];
+		} catch (error) {
+			if (error?.code === 'ENOENT') return [];
+			throw error;
+		}
+	};
+	const testFiles = discoverPackageTests(packageDirectory).flatMap(resolveIfPresent);
+	const reportEligibleTestFiles =
+		discoverReportEligiblePackageTests(packageDirectory).flatMap(resolveIfPresent);
 	if (testFiles.length === 0) {
 		throw new Error('Package test gate has no package-local test file candidates');
 	}

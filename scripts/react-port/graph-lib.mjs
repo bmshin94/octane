@@ -88,7 +88,14 @@ function hasConfinedPackageTests(repoRoot, binding) {
 	confinedRepositoryPath(repoRoot, `packages/${binding.dir}`, 'directory');
 	const tests = discoverPackageTests(binding.directory);
 	for (const file of tests) {
-		confinedRepositoryPath(repoRoot, path.relative(path.resolve(repoRoot), file));
+		try {
+			confinedRepositoryPath(repoRoot, path.relative(path.resolve(repoRoot), file));
+		} catch (error) {
+			// Materialized upstream test trees are regenerated in place, so a
+			// discovered file can be removed before this check resolves it; a
+			// vanished file is absent, not a confinement escape.
+			if (error?.code !== 'ENOENT') throw error;
+		}
 	}
 	return tests.length > 0;
 }
