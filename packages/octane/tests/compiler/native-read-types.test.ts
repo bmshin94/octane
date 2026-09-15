@@ -71,6 +71,22 @@ function fixture(source: string, otherFiles: Record<string, string> = {}) {
 }
 
 describe('optional native signal type validation', () => {
+	it('exempts logical host style values and shorthand CSS keys without exempting ordinary names', () => {
+		const result = fixture(`/** @jsxImportSource octane */
+${PRELUDE}
+declare const enabled: boolean;
+declare const fallback: import('octane').CSSProperties | undefined;
+declare const left: SignalHandle<number>;
+const andStyle = <div style={enabled && { left: task$ } || undefined} />;
+const orStyle = <div style={fallback || { left: task$ }} />;
+const nullishStyle = <div style={fallback ?? { left: task$ }} />;
+const shorthand = <div style={{ left }} />;
+const ordinary = { left };
+`);
+		// The local handle declaration and ordinary object's property still need $.
+		expect(result.names).toEqual(['left', 'left']);
+	});
+
 	it('accepts precise signal CSS types while preserving ordinary CSSProperties', () => {
 		fixture(`/** @jsxImportSource octane */
 ${PRELUDE}

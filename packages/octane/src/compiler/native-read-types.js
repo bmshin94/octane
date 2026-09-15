@@ -279,6 +279,11 @@ export function validateNativeSignalNames(program, file) {
 				ts.isAsExpression(object.parent) ||
 				ts.isSatisfiesExpression(object.parent) ||
 				ts.isNonNullExpression(object.parent) ||
+				(ts.isBinaryExpression(object.parent) &&
+					(object.parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+						object.parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+						(object.parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
+							object.parent.right === object))) ||
 				(ts.isConditionalExpression(object.parent) &&
 					(object.parent.whenTrue === object || object.parent.whenFalse === object)))
 		)
@@ -298,13 +303,10 @@ export function validateNativeSignalNames(program, file) {
 			if (!node.isTypeOnly && !node.parent.parent.isTypeOnly) checkName(node.name);
 		} else if (ts.isExportSpecifier(node)) {
 			if (valueExport(node)) checkName(node.name, node.propertyName ?? node.name);
-		} else if (ts.isPropertyAssignment(node)) {
-			if (!isDomStyleProperty(node)) checkName(node.name, node.initializer);
-		} else if (
-			ts.isShorthandPropertyAssignment(node) ||
-			ts.isPropertyDeclaration(node) ||
-			ts.isPropertySignature(node)
-		) {
+		} else if (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) {
+			if (!isDomStyleProperty(node))
+				checkName(node.name, ts.isPropertyAssignment(node) ? node.initializer : node.name);
+		} else if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
 			checkName(node.name);
 		} else if (
 			ts.isFunctionDeclaration(node) ||

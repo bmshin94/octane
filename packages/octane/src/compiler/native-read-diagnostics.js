@@ -516,6 +516,8 @@ export function analyzeNativeReadDiagnostics(ast, source, filename, options = {}
 		while (
 			container &&
 			(WRAPPERS.has(container.type) ||
+				(container.type === 'LogicalExpression' &&
+					(container.operator !== '&&' || container.right === object)) ||
 				(container.type === 'ConditionalExpression' &&
 					(container.consequent === object || container.alternate === object)))
 		) {
