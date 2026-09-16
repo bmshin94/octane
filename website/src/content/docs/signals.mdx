@@ -306,7 +306,8 @@ import { query$, skip } from 'octane/signals';
 import { selectedId$ } from './user-data';
 import { watchNotifications } from './api';
 
-export const notification$ = query$(
+type Notification = { text: string };
+export const notification$ = query$<number, Notification>(
 	() => selectedId$.get() ?? skip,
 	(id, { signal }) => watchNotifications(id, signal),
 	{ kind: 'stream' },
@@ -314,7 +315,7 @@ export const notification$ = query$(
 ```
 
 Here `watchNotifications(id, signal)` is your producer returning an
-`AsyncIterable` of complete notification values. Before its first
+`AsyncIterable<Notification>` of complete notification values. Before its first
 yield, the resource is pending and `connection` is `connecting`. Each yield
 publishes a ready value with an `open` connection. Normal completion retains the
 last value, closes the connection, and sets `complete: true`. Completing before

@@ -289,6 +289,21 @@ export const greeting$ = derived$(async ({ read, signal }) => {
 - Async `derived$` uses its attempt-bound `read(handle$)` to await and track dependencies, including after `await`. Dependency changes abort the attempt and invalidate obsolete resolutions, errors, yields, and completion. The compiler supports proven async native reads; opaque helpers use explicit `read`. There is no ambient dependency context across arbitrary async code.
 - For streams, use `query$(select, load, { kind: 'stream' })` or return an async iterable from `derived$` (no `kind` option needed there). Before first yield the source is pending/connecting; yields are ready/open; completion retains the last value with closed/complete. Completing without a yield is an error. Cancellation requests abort and iterator closure. Promises of iterables are unwrapped before publishing.
 
+For example, given an application `watchNotifications(id, signal)` returning `AsyncIterable<Notification>`:
+
+```ts
+import { query$, skip } from 'octane/signals';
+import { selectedId$ } from './user-data';
+import { watchNotifications } from './api';
+
+type Notification = { text: string };
+export const notification$ = query$<number, Notification>(
+  () => selectedId$.get() ?? skip,
+  (id, { signal }) => watchNotifications(id, signal),
+  { kind: 'stream' },
+);
+```
+
 Every module consuming native reads needs a runtime import from a signals entry; a type-only import or `$` name alone is insufficient. For imported handles, a side-effect import enables compilation. Handle idle separately, then use a pending/error boundary:
 
 ```tsrx
